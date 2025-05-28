@@ -12,6 +12,7 @@
 # - GUI 界面添加进度条，实时展示拷贝进度并在完成后反馈结果。
 # - 增加活动名称输入功能，使拷贝后的文件夹名称包含活动名称。
 # - 当 SD 卡目录中没有可用的图片或视频文件时，提醒用户该路径为空。
+# - 支持RAW文件和JPG文件分开拷贝到不同文件夹。2025-05-28
 # 
 # ## 问题修复与优化
 # - 修复进度条卡住问题，拷贝完成后反馈最终生成的文件夹名称。
@@ -21,6 +22,7 @@
 # - 调整逻辑，放弃读取 EXIF 信息，改用文件修改时间确定日期。
 # - 添加详细日志，用于排查 `.CR3` 文件拷贝失败问题。
 # - 修复未选择日期直接点击开始拷贝程序无法正常使用的 BUG。
+# - 修复macOS深色模式下UI显示问题。2025-05-28
 
 import os
 import datetime
@@ -86,6 +88,8 @@ class CopyThread(QThread):
             '.srw',  # 三星 RAW 格式
             '.x3f'   # 适马 RAW 格式
         )
+        # 单独定义RAW格式扩展名（需要和image_extensions保持一致）
+        raw_extensions = ('.raw', '.nef', '.cr2', '.CR3', '.arw', '.dng', '.raf', '.orf', '.pef', '.srw', '.x3f')
         video_extensions = ('.mp4', '.avi', '.mov')
 
         all_files = []
@@ -150,12 +154,22 @@ class CopyThread(QThread):
                                 # 仅为图片文件夹创建“选择”和“原图”子文件夹
                                 select_folder = os.path.join(folder_path, '选择')
                                 original_folder = os.path.join(folder_path, '原图')
+                                # 新增RAW和JPG分类子文件夹
+                                raw_folder = os.path.join(original_folder, 'RAW')
+                                jpg_folder = os.path.join(original_folder, 'JPG')
                                 if not os.path.exists(select_folder):
                                     os.makedirs(select_folder)
                                     logging.info(f"Created subfolder: {select_folder}")
                                 if not os.path.exists(original_folder):
                                     os.makedirs(original_folder)
                                     logging.info(f"Created subfolder: {original_folder}")
+                                # 创建分类子目录
+                                if not os.path.exists(raw_folder):
+                                    os.makedirs(raw_folder)
+                                    logging.info(f"Created subfolder: {raw_folder}")
+                                if not os.path.exists(jpg_folder):
+                                    os.makedirs(jpg_folder)
+                                    logging.info(f"Created subfolder: {jpg_folder}")
                         except Exception as e:
                             logging.error(f"Failed to create folder {folder_path}: {e}")
                             continue
@@ -163,8 +177,13 @@ class CopyThread(QThread):
 
                 # 处理文件名重复情况
                 new_file_name = file
+                file_ext = os.path.splitext(file)[1].lower()
+                # 区分RAW和JPG存储路径
                 if is_image:
-                    target_subfolder = os.path.join(folder_path, '原图')
+                    if file_ext in raw_extensions:
+                        target_subfolder = os.path.join(folder_path, '原图', 'RAW')
+                    else:
+                        target_subfolder = os.path.join(folder_path, '原图', 'JPG')
                 else:
                     target_subfolder = folder_path
                 new_file_path = os.path.join(target_subfolder, new_file_name)
@@ -175,7 +194,7 @@ class CopyThread(QThread):
                     new_file_path = os.path.join(target_subfolder, new_file_name)
                     counter += 1
 
-                # 拷贝文件并进行哈希校验
+                # 拷贝文件并进行哈希校验（原逻辑不变）
                 try:
                     logging.info(f"Copying {file} to {new_file_path}")
                     shutil.copy2(file_path, new_file_path)
@@ -193,7 +212,7 @@ class CopyThread(QThread):
             progress = int((copied_files / total_files) * 100)
             self.progress_signal.emit(progress)
 
-        # 确保进度条达到 100%
+        # 确保进度条达到 100%（原逻辑不变）
         self.progress_signal.emit(100)
 
         result_msg = f"拷贝完成，生成的文件夹有：{', '.join(created_folders)}"
