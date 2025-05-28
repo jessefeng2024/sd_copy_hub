@@ -210,10 +210,9 @@ class MainWindow(QWidget):
         self.setWindowTitle('拷卡并校验')
         self.setGeometry(300, 300, 800, 600)
 
-        # 设置窗口背景颜色
-        palette = self.palette()
-        palette.setColor(QPalette.Window, QColor(240, 240, 240))
-        self.setPalette(palette)
+        # 获取系统默认调色板并自动适配主题
+        system_palette = QApplication.palette()
+        self.setPalette(system_palette)  # 初始使用系统默认调色板
 
         # 创建布局
         main_layout = QVBoxLayout()
@@ -224,21 +223,25 @@ class MainWindow(QWidget):
         image_label.setFont(QFont('Arial', 12))
         self.image_input = QLineEdit(image_target_directory)
         self.image_input.setFont(QFont('Arial', 12))
+        # 使用系统输入框样式（自动适配深浅模式）
+        input_palette = self.image_input.palette()  # 直接使用系统默认输入框调色板
+        self.image_input.setPalette(input_palette)
         image_button = QPushButton('选择目录')
         image_button.setFont(QFont('Arial', 12))
         image_button.setStyleSheet("QPushButton { background-color: #05B8CC; color: white; border: none; border-radius: 5px; padding: 5px 10px; }"
-                                    "QPushButton:hover { background-color: #0497AB; }")
+                                    "QPushButton:hover { background-color: #0497AB; }")  # 保留自定义按钮颜色
         image_button.clicked.connect(self.select_image_directory)
         image_layout.addWidget(image_label)
         image_layout.addWidget(self.image_input)
         image_layout.addWidget(image_button)
 
-        # 视频目标目录选择
+        # 视频目标目录选择（样式自动适配）
         video_layout = QHBoxLayout()
         video_label = QLabel('视频目标目录:')
         video_label.setFont(QFont('Arial', 12))
         self.video_input = QLineEdit(video_target_directory)
         self.video_input.setFont(QFont('Arial', 12))
+        self.video_input.setPalette(input_palette)  # 复用系统输入框样式
         video_button = QPushButton('选择目录')
         video_button.setFont(QFont('Arial', 12))
         video_button.setStyleSheet("QPushButton { background-color: #05B8CC; color: white; border: none; border-radius: 5px; padding: 5px 10px; }"
@@ -248,7 +251,7 @@ class MainWindow(QWidget):
         video_layout.addWidget(self.video_input)
         video_layout.addWidget(video_button)
 
-        # SD 卡目录选择
+        # SD 卡目录选择（样式自动适配）
         sd_layout = QHBoxLayout()
         sd_label = QLabel('SD 卡目录:')
         sd_label.setFont(QFont('Arial', 12))
@@ -263,22 +266,25 @@ class MainWindow(QWidget):
         sd_layout.addWidget(self.sd_input)
         sd_layout.addWidget(sd_button)
 
-        # 活动名称输入
+        # 活动名称输入（样式自动适配）
         event_layout = QHBoxLayout()
         event_label = QLabel('活动名称:')
         event_label.setFont(QFont('Arial', 12))
         self.event_input = QLineEdit()
         self.event_input.setFont(QFont('Arial', 12))
+        self.event_input.setPalette(input_palette)  # 复用系统输入框样式
         event_layout.addWidget(event_label)
         event_layout.addWidget(self.event_input)
 
-        # 日期选择下拉框
+        # 日期选择下拉框（使用系统主题样式）
         date_layout = QHBoxLayout()
         date_label = QLabel('选择日期:')
         date_label.setFont(QFont('Arial', 12))
         self.date_combo = QComboBox()
         self.date_combo.setFont(QFont('Arial', 12))
-        # 初始就添加“全部日期”选项
+        # 使用系统主题颜色
+        self.date_combo.setStyleSheet("QComboBox { color: palette(window-text); background-color: palette(base); }"
+                                      "QComboBox QAbstractItemView { color: palette(window-text); background-color: palette(base); }")
         self.date_combo.addItem("全部日期")
         date_button = QPushButton('获取日期')
         date_button.setFont(QFont('Arial', 12))
@@ -289,25 +295,25 @@ class MainWindow(QWidget):
         date_layout.addWidget(self.date_combo)
         date_layout.addWidget(date_button)
 
-        # 进度条
+        # 进度条（使用系统主题颜色）
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        self.progress_bar.setStyleSheet("QProgressBar { border: 2px solid grey; border-radius: 5px; text-align: center; }"
-                                        "QProgressBar::chunk { background-color: #05B8CC; width: 20px; }")
+        self.progress_bar.setStyleSheet("QProgressBar { border: 2px solid palette(mid); border-radius: 5px; text-align: center; color: palette(window-text); }"
+                                        "QProgressBar::chunk { background-color: palette(highlight); width: 20px; }")
 
-        # 结果显示标签，设置自动换行
+        # 结果显示标签（自动适配文字颜色）
         self.result_label = QLabel()
         self.result_label.setFont(QFont('Arial', 12))
         self.result_label.setWordWrap(True)
 
-        # 开始拷贝按钮
+        # 开始拷贝按钮（保留自定义颜色）
         start_button = QPushButton('开始拷贝')
         start_button.setFont(QFont('Arial', 14, QFont.Bold))
         start_button.setStyleSheet("QPushButton { background-color: #FFA500; color: white; border: none; border-radius: 5px; padding: 10px 20px; }"
                                    "QPushButton:hover { background-color: #FF8C00; }")
         start_button.clicked.connect(self.start_copying)
 
-        # 使用说明书
+        # 使用说明书（自动适配背景和文字颜色）
         instruction_text = """
 使用说明：
 1. 选择图片目标目录：点击“选择目录”按钮，指定图片拷贝的目标文件夹。
@@ -322,7 +328,8 @@ class MainWindow(QWidget):
         instruction_label = QTextEdit()
         instruction_label.setReadOnly(True)
         instruction_label.setFont(QFont('Arial', 10))
-        instruction_label.setStyleSheet("QTextEdit { background-color: #E0E0E0; border: none; padding: 10px; }")
+        # 使用系统主题颜色
+        instruction_label.setStyleSheet("QTextEdit { background-color: palette(base); color: palette(window-text); border: none; padding: 10px; }")
         instruction_label.setText(instruction_text)
 
         # 添加布局到主布局
