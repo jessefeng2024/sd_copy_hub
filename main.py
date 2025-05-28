@@ -12,7 +12,7 @@
 # - GUI 界面添加进度条，实时展示拷贝进度并在完成后反馈结果。
 # - 增加活动名称输入功能，使拷贝后的文件夹名称包含活动名称。
 # - 当 SD 卡目录中没有可用的图片或视频文件时，提醒用户该路径为空。
-# - 支持RAW文件和JPG文件分开拷贝到不同文件夹。2025-05-28
+# - 支持开关控制RAW文件和JPG文件是否分开拷贝到不同文件夹。2025-05-28
 # 
 # ## 问题修复与优化
 # - 修复进度条卡住问题，拷贝完成后反馈最终生成的文件夹名称。
@@ -33,7 +33,11 @@ from PIL import Image
 from PIL.ExifTags import TAGS
 import configparser
 from pathlib import Path
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QFileDialog, QProgressBar, QComboBox, QTextEdit, QMessageBox
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QLineEdit, QFileDialog, QProgressBar, QComboBox, QTextEdit, QMessageBox,
+    QCheckBox
+)
 from PyQt5.QtGui import QFont, QPalette, QColor
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -68,13 +72,15 @@ class CopyThread(QThread):
     progress_signal = pyqtSignal(int)
     result_signal = pyqtSignal(str)
 
-    def __init__(self, image_target, video_target, sd_card, event_name, selected_dates):
+    def __init__(self, image_target, video_target, sd_card, event_name, selected_dates, separate_raw):
         super().__init__()
         self.image_target = image_target
         self.video_target = video_target
         self.sd_card = sd_card
         self.event_name = event_name
         self.selected_dates = selected_dates
+        # 新增：接收是否分开存放的参数
+        self.separate_raw = separate_raw
 
     def run(self):
         # 定义图片文件的扩展名，包含更多 RAW 格式
@@ -154,22 +160,23 @@ class CopyThread(QThread):
                                 # 仅为图片文件夹创建“选择”和“原图”子文件夹
                                 select_folder = os.path.join(folder_path, '选择')
                                 original_folder = os.path.join(folder_path, '原图')
-                                # 新增RAW和JPG分类子文件夹
-                                raw_folder = os.path.join(original_folder, 'RAW')
-                                jpg_folder = os.path.join(original_folder, 'JPG')
-                                if not os.path.exists(select_folder):
-                                    os.makedirs(select_folder)
-                                    logging.info(f"Created subfolder: {select_folder}")
-                                if not os.path.exists(original_folder):
-                                    os.makedirs(original_folder)
-                                    logging.info(f"Created subfolder: {original_folder}")
-                                # 创建分类子目录
-                                if not os.path.exists(raw_folder):
-                                    os.makedirs(raw_folder)
-                                    logging.info(f"Created subfolder: {raw_folder}")
-                                if not os.path.exists(jpg_folder):
-                                    os.makedirs(jpg_folder)
-                                    logging.info(f"Created subfolder: {jpg_folder}")
+                                # 新增：根据复选框状态决定是否创建RAW/JPG子文件夹
+                                if self.separate_raw:
+                                    raw_folder = os.path.join(original_folder, 'RAW')
+                                    jpg_folder = os.path.join(original_folder, 'JPG')
+                                    if not os.path.exists(select_folder):
+                                        os.makedirs(select_folder)
+                                        logging.info(f"Created subfolder: {select_folder}")
+                                    if not os.path.exists(original_folder):
+                                        os.makedirs(original_folder)
+                                        logging.info(f"Created subfolder: {original_folder}")
+                                    # 创建分类子目录
+                                    if not os.path.exists(raw_folder):
+                                        os.makedirs(raw_folder)
+                                        logging.info(f"Created subfolder: {raw_folder}")
+                                    if not os.path.exists(jpg_folder):
+                                        os.makedirs(jpg_folder)
+                                        logging.info(f"Created subfolder: {jpg_folder}")
                         except Exception as e:
                             logging.error(f"Failed to create folder {folder_path}: {e}")
                             continue
@@ -180,10 +187,14 @@ class CopyThread(QThread):
                 file_ext = os.path.splitext(file)[1].lower()
                 # 区分RAW和JPG存储路径
                 if is_image:
-                    if file_ext in raw_extensions:
-                        target_subfolder = os.path.join(folder_path, '原图', 'RAW')
+                    # 新增：根据复选框状态选择目标子文件夹
+                    if self.separate_raw:
+                        if file_ext in raw_extensions:
+                            target_subfolder = os.path.join(folder_path, '原图', 'RAW')
+                        else:
+                            target_subfolder = os.path.join(folder_path, '原图', 'JPG')
                     else:
-                        target_subfolder = os.path.join(folder_path, '原图', 'JPG')
+                        target_subfolder = os.path.join(folder_path, '原图')  # 不分类时直接存到“原图”
                 else:
                     target_subfolder = folder_path
                 new_file_path = os.path.join(target_subfolder, new_file_name)
@@ -294,6 +305,14 @@ class MainWindow(QWidget):
         self.event_input.setPalette(input_palette)  # 复用系统输入框样式
         event_layout.addWidget(event_label)
         event_layout.addWidget(self.event_input)
+        main_layout.addLayout(event_layout)
+
+        # 新增：分开存放RAW和JPG的复选框
+        separate_layout = QHBoxLayout()
+        self.separate_raw_checkbox = QCheckBox('分开存放RAW和JPG文件')
+        self.separate_raw_checkbox.setFont(QFont('Arial', 12))
+        separate_layout.addWidget(self.separate_raw_checkbox)
+        main_layout.addLayout(separate_layout)
 
         # 日期选择下拉框（使用系统主题样式）
         date_layout = QHBoxLayout()
@@ -416,12 +435,15 @@ class MainWindow(QWidget):
         sd_card = self.sd_input.text()
         event_name = self.event_input.text()
         selected_date = self.date_combo.currentText()
+        # 新增：获取复选框状态
+        separate_raw = self.separate_raw_checkbox.isChecked()
         if selected_date == "全部日期":
             selected_dates = []
         else:
             selected_dates = [selected_date]
 
-        self.copy_thread = CopyThread(image_target, video_target, sd_card, event_name, selected_dates)
+        # 传递新参数到拷贝线程
+        self.copy_thread = CopyThread(image_target, video_target, sd_card, event_name, selected_dates, separate_raw)
         self.copy_thread.progress_signal.connect(self.update_progress)
         self.copy_thread.result_signal.connect(self.show_result)
         self.copy_thread.start()
