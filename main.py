@@ -12,6 +12,7 @@
 # - GUI 界面添加进度条，实时展示拷贝进度并在完成后反馈结果。
 # - 增加活动名称输入功能，使拷贝后的文件夹名称包含活动名称。
 # - 当 SD 卡目录中没有可用的图片或视频文件时，提醒用户该路径为空。
+# - 支持开关控制RAW文件和JPG文件是否分开拷贝到不同文件夹。2025-05-28
 # 
 # ## 问题修复与优化
 # - 修复进度条卡住问题，拷贝完成后反馈最终生成的文件夹名称。
@@ -21,6 +22,7 @@
 # - 调整逻辑，放弃读取 EXIF 信息，改用文件修改时间确定日期。
 # - 添加详细日志，用于排查 `.CR3` 文件拷贝失败问题。
 # - 修复未选择日期直接点击开始拷贝程序无法正常使用的 BUG。
+# - 修复macOS深色模式下UI显示问题。2025-05-28
 
 import os
 import datetime
@@ -31,7 +33,11 @@ from PIL import Image
 from PIL.ExifTags import TAGS
 import configparser
 from pathlib import Path
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QFileDialog, QProgressBar, QComboBox, QTextEdit, QMessageBox
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QLineEdit, QFileDialog, QProgressBar, QComboBox, QTextEdit, QMessageBox,
+    QCheckBox
+)
 from PyQt5.QtGui import QFont, QPalette, QColor
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -66,13 +72,15 @@ class CopyThread(QThread):
     progress_signal = pyqtSignal(int)
     result_signal = pyqtSignal(str)
 
-    def __init__(self, image_target, video_target, sd_card, event_name, selected_dates):
+    def __init__(self, image_target, video_target, sd_card, event_name, selected_dates, separate_raw):
         super().__init__()
         self.image_target = image_target
         self.video_target = video_target
         self.sd_card = sd_card
         self.event_name = event_name
         self.selected_dates = selected_dates
+        # 新增：接收是否分开存放的参数
+        self.separate_raw = separate_raw
 
     def run(self):
         # 定义图片文件的扩展名，包含更多 RAW 格式
@@ -86,6 +94,8 @@ class CopyThread(QThread):
             '.srw',  # 三星 RAW 格式
             '.x3f'   # 适马 RAW 格式
         )
+        # 单独定义RAW格式扩展名（需要和image_extensions保持一致）
+        raw_extensions = ('.raw', '.nef', '.cr2', '.CR3', '.arw', '.dng', '.raf', '.orf', '.pef', '.srw', '.x3f')
         video_extensions = ('.mp4', '.avi', '.mov')
 
         all_files = []
@@ -150,12 +160,23 @@ class CopyThread(QThread):
                                 # 仅为图片文件夹创建“选择”和“原图”子文件夹
                                 select_folder = os.path.join(folder_path, '选择')
                                 original_folder = os.path.join(folder_path, '原图')
-                                if not os.path.exists(select_folder):
-                                    os.makedirs(select_folder)
-                                    logging.info(f"Created subfolder: {select_folder}")
-                                if not os.path.exists(original_folder):
-                                    os.makedirs(original_folder)
-                                    logging.info(f"Created subfolder: {original_folder}")
+                                # 新增：根据复选框状态决定是否创建RAW/JPG子文件夹
+                                if self.separate_raw:
+                                    raw_folder = os.path.join(original_folder, 'RAW')
+                                    jpg_folder = os.path.join(original_folder, 'JPG')
+                                    if not os.path.exists(select_folder):
+                                        os.makedirs(select_folder)
+                                        logging.info(f"Created subfolder: {select_folder}")
+                                    if not os.path.exists(original_folder):
+                                        os.makedirs(original_folder)
+                                        logging.info(f"Created subfolder: {original_folder}")
+                                    # 创建分类子目录
+                                    if not os.path.exists(raw_folder):
+                                        os.makedirs(raw_folder)
+                                        logging.info(f"Created subfolder: {raw_folder}")
+                                    if not os.path.exists(jpg_folder):
+                                        os.makedirs(jpg_folder)
+                                        logging.info(f"Created subfolder: {jpg_folder}")
                         except Exception as e:
                             logging.error(f"Failed to create folder {folder_path}: {e}")
                             continue
@@ -163,8 +184,17 @@ class CopyThread(QThread):
 
                 # 处理文件名重复情况
                 new_file_name = file
+                file_ext = os.path.splitext(file)[1].lower()
+                # 区分RAW和JPG存储路径
                 if is_image:
-                    target_subfolder = os.path.join(folder_path, '原图')
+                    # 新增：根据复选框状态选择目标子文件夹
+                    if self.separate_raw:
+                        if file_ext in raw_extensions:
+                            target_subfolder = os.path.join(folder_path, '原图', 'RAW')
+                        else:
+                            target_subfolder = os.path.join(folder_path, '原图', 'JPG')
+                    else:
+                        target_subfolder = os.path.join(folder_path, '原图')  # 不分类时直接存到“原图”
                 else:
                     target_subfolder = folder_path
                 new_file_path = os.path.join(target_subfolder, new_file_name)
@@ -175,7 +205,7 @@ class CopyThread(QThread):
                     new_file_path = os.path.join(target_subfolder, new_file_name)
                     counter += 1
 
-                # 拷贝文件并进行哈希校验
+                # 拷贝文件并进行哈希校验（原逻辑不变）
                 try:
                     logging.info(f"Copying {file} to {new_file_path}")
                     shutil.copy2(file_path, new_file_path)
@@ -193,7 +223,7 @@ class CopyThread(QThread):
             progress = int((copied_files / total_files) * 100)
             self.progress_signal.emit(progress)
 
-        # 确保进度条达到 100%
+        # 确保进度条达到 100%（原逻辑不变）
         self.progress_signal.emit(100)
 
         result_msg = f"拷贝完成，生成的文件夹有：{', '.join(created_folders)}"
@@ -210,10 +240,9 @@ class MainWindow(QWidget):
         self.setWindowTitle('拷卡并校验')
         self.setGeometry(300, 300, 800, 600)
 
-        # 设置窗口背景颜色
-        palette = self.palette()
-        palette.setColor(QPalette.Window, QColor(240, 240, 240))
-        self.setPalette(palette)
+        # 获取系统默认调色板并自动适配主题
+        system_palette = QApplication.palette()
+        self.setPalette(system_palette)  # 初始使用系统默认调色板
 
         # 创建布局
         main_layout = QVBoxLayout()
@@ -224,21 +253,25 @@ class MainWindow(QWidget):
         image_label.setFont(QFont('Arial', 12))
         self.image_input = QLineEdit(image_target_directory)
         self.image_input.setFont(QFont('Arial', 12))
+        # 使用系统输入框样式（自动适配深浅模式）
+        input_palette = self.image_input.palette()  # 直接使用系统默认输入框调色板
+        self.image_input.setPalette(input_palette)
         image_button = QPushButton('选择目录')
         image_button.setFont(QFont('Arial', 12))
         image_button.setStyleSheet("QPushButton { background-color: #05B8CC; color: white; border: none; border-radius: 5px; padding: 5px 10px; }"
-                                    "QPushButton:hover { background-color: #0497AB; }")
+                                    "QPushButton:hover { background-color: #0497AB; }")  # 保留自定义按钮颜色
         image_button.clicked.connect(self.select_image_directory)
         image_layout.addWidget(image_label)
         image_layout.addWidget(self.image_input)
         image_layout.addWidget(image_button)
 
-        # 视频目标目录选择
+        # 视频目标目录选择（样式自动适配）
         video_layout = QHBoxLayout()
         video_label = QLabel('视频目标目录:')
         video_label.setFont(QFont('Arial', 12))
         self.video_input = QLineEdit(video_target_directory)
         self.video_input.setFont(QFont('Arial', 12))
+        self.video_input.setPalette(input_palette)  # 复用系统输入框样式
         video_button = QPushButton('选择目录')
         video_button.setFont(QFont('Arial', 12))
         video_button.setStyleSheet("QPushButton { background-color: #05B8CC; color: white; border: none; border-radius: 5px; padding: 5px 10px; }"
@@ -248,7 +281,7 @@ class MainWindow(QWidget):
         video_layout.addWidget(self.video_input)
         video_layout.addWidget(video_button)
 
-        # SD 卡目录选择
+        # SD 卡目录选择（样式自动适配）
         sd_layout = QHBoxLayout()
         sd_label = QLabel('SD 卡目录:')
         sd_label.setFont(QFont('Arial', 12))
@@ -263,22 +296,33 @@ class MainWindow(QWidget):
         sd_layout.addWidget(self.sd_input)
         sd_layout.addWidget(sd_button)
 
-        # 活动名称输入
+        # 活动名称输入（样式自动适配）
         event_layout = QHBoxLayout()
         event_label = QLabel('活动名称:')
         event_label.setFont(QFont('Arial', 12))
         self.event_input = QLineEdit()
         self.event_input.setFont(QFont('Arial', 12))
+        self.event_input.setPalette(input_palette)  # 复用系统输入框样式
         event_layout.addWidget(event_label)
         event_layout.addWidget(self.event_input)
+        main_layout.addLayout(event_layout)
 
-        # 日期选择下拉框
+        # 新增：分开存放RAW和JPG的复选框
+        separate_layout = QHBoxLayout()
+        self.separate_raw_checkbox = QCheckBox('分开存放RAW和JPG文件')
+        self.separate_raw_checkbox.setFont(QFont('Arial', 12))
+        separate_layout.addWidget(self.separate_raw_checkbox)
+        main_layout.addLayout(separate_layout)
+
+        # 日期选择下拉框（使用系统主题样式）
         date_layout = QHBoxLayout()
         date_label = QLabel('选择日期:')
         date_label.setFont(QFont('Arial', 12))
         self.date_combo = QComboBox()
         self.date_combo.setFont(QFont('Arial', 12))
-        # 初始就添加“全部日期”选项
+        # 使用系统主题颜色
+        self.date_combo.setStyleSheet("QComboBox { color: palette(window-text); background-color: palette(base); }"
+                                      "QComboBox QAbstractItemView { color: palette(window-text); background-color: palette(base); }")
         self.date_combo.addItem("全部日期")
         date_button = QPushButton('获取日期')
         date_button.setFont(QFont('Arial', 12))
@@ -289,25 +333,25 @@ class MainWindow(QWidget):
         date_layout.addWidget(self.date_combo)
         date_layout.addWidget(date_button)
 
-        # 进度条
+        # 进度条（使用系统主题颜色）
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        self.progress_bar.setStyleSheet("QProgressBar { border: 2px solid grey; border-radius: 5px; text-align: center; }"
-                                        "QProgressBar::chunk { background-color: #05B8CC; width: 20px; }")
+        self.progress_bar.setStyleSheet("QProgressBar { border: 2px solid palette(mid); border-radius: 5px; text-align: center; color: palette(window-text); }"
+                                        "QProgressBar::chunk { background-color: palette(highlight); width: 20px; }")
 
-        # 结果显示标签，设置自动换行
+        # 结果显示标签（自动适配文字颜色）
         self.result_label = QLabel()
         self.result_label.setFont(QFont('Arial', 12))
         self.result_label.setWordWrap(True)
 
-        # 开始拷贝按钮
+        # 开始拷贝按钮（保留自定义颜色）
         start_button = QPushButton('开始拷贝')
         start_button.setFont(QFont('Arial', 14, QFont.Bold))
         start_button.setStyleSheet("QPushButton { background-color: #FFA500; color: white; border: none; border-radius: 5px; padding: 10px 20px; }"
                                    "QPushButton:hover { background-color: #FF8C00; }")
         start_button.clicked.connect(self.start_copying)
 
-        # 使用说明书
+        # 使用说明书（自动适配背景和文字颜色）
         instruction_text = """
 使用说明：
 1. 选择图片目标目录：点击“选择目录”按钮，指定图片拷贝的目标文件夹。
@@ -322,7 +366,8 @@ class MainWindow(QWidget):
         instruction_label = QTextEdit()
         instruction_label.setReadOnly(True)
         instruction_label.setFont(QFont('Arial', 10))
-        instruction_label.setStyleSheet("QTextEdit { background-color: #E0E0E0; border: none; padding: 10px; }")
+        # 使用系统主题颜色
+        instruction_label.setStyleSheet("QTextEdit { background-color: palette(base); color: palette(window-text); border: none; padding: 10px; }")
         instruction_label.setText(instruction_text)
 
         # 添加布局到主布局
@@ -390,12 +435,15 @@ class MainWindow(QWidget):
         sd_card = self.sd_input.text()
         event_name = self.event_input.text()
         selected_date = self.date_combo.currentText()
+        # 新增：获取复选框状态
+        separate_raw = self.separate_raw_checkbox.isChecked()
         if selected_date == "全部日期":
             selected_dates = []
         else:
             selected_dates = [selected_date]
 
-        self.copy_thread = CopyThread(image_target, video_target, sd_card, event_name, selected_dates)
+        # 传递新参数到拷贝线程
+        self.copy_thread = CopyThread(image_target, video_target, sd_card, event_name, selected_dates, separate_raw)
         self.copy_thread.progress_signal.connect(self.update_progress)
         self.copy_thread.result_signal.connect(self.show_result)
         self.copy_thread.start()
