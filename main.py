@@ -1,29 +1,3 @@
-# # changelog:
-# # Version 1.8 - 2025-03-18
-# ## 功能特性
-# - 优化 UI 界面，使其更加美观和现代化。
-# - 在 UI 上添加简洁的使用说明书，方便用户了解程序运行方式。
-# - 若用户未选择日期，程序会拷贝卡上所有日期的文件。
-# - 优化日期选择部分的 UI，采用下拉框形式。
-# - 实现从 SD 卡拷贝图片和视频到指定目录，支持用户通过 GUI 指定图片、视频目标目录及 SD 卡目录。
-# - 基于拍摄日期或修改时间创建文件夹，完成图片、视频文件重命名。
-# - 处理文件名重复场景，通过添加序号避免文件覆盖。
-# - 集成哈希校验功能，保障文件拷贝准确性。
-# - GUI 界面添加进度条，实时展示拷贝进度并在完成后反馈结果。
-# - 增加活动名称输入功能，使拷贝后的文件夹名称包含活动名称。
-# - 当 SD 卡目录中没有可用的图片或视频文件时，提醒用户该路径为空。
-# - 支持开关控制RAW文件和JPG文件是否分开拷贝到不同文件夹。2025-05-28
-# 
-# ## 问题修复与优化
-# - 修复进度条卡住问题，拷贝完成后反馈最终生成的文件夹名称。
-# - 优化结果文字显示，支持自动换行。
-# - 解决进度条异常问题。
-# - 增加对 `.CR3` 文件的支持。
-# - 调整逻辑，放弃读取 EXIF 信息，改用文件修改时间确定日期。
-# - 添加详细日志，用于排查 `.CR3` 文件拷贝失败问题。
-# - 修复未选择日期直接点击开始拷贝程序无法正常使用的 BUG。
-# - 修复macOS深色模式下UI显示问题。2025-05-28
-
 import os
 import datetime
 import shutil
@@ -38,8 +12,8 @@ from PyQt5.QtWidgets import (
     QLineEdit, QFileDialog, QProgressBar, QComboBox, QTextEdit, QMessageBox,
     QCheckBox
 )
-from PyQt5.QtGui import QFont, QPalette, QColor
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtGui import QFont, QPalette, QColor, QFontDatabase
+from PyQt5.QtCore import QThread, pyqtSignal, Qt  # 新增Qt导入
 
 # 配置日志记录
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -157,20 +131,15 @@ class CopyThread(QThread):
                             os.makedirs(folder_path)
                             logging.info(f"Created folder: {folder_path}")
                             if is_image:
-                                # 仅为图片文件夹创建“选择”和“原图”子文件夹
-                                select_folder = os.path.join(folder_path, '选择')
+                                # 仅创建"原图"子目录（移除"选择"目录创建）
                                 original_folder = os.path.join(folder_path, '原图')
-                                # 新增：根据复选框状态决定是否创建RAW/JPG子文件夹
+                                if not os.path.exists(original_folder):
+                                    os.makedirs(original_folder)
+                                    logging.info(f"Created subfolder: {original_folder}")
+                                # 仅勾选时创建RAW/JPG子目录
                                 if self.separate_raw:
                                     raw_folder = os.path.join(original_folder, 'RAW')
                                     jpg_folder = os.path.join(original_folder, 'JPG')
-                                    if not os.path.exists(select_folder):
-                                        os.makedirs(select_folder)
-                                        logging.info(f"Created subfolder: {select_folder}")
-                                    if not os.path.exists(original_folder):
-                                        os.makedirs(original_folder)
-                                        logging.info(f"Created subfolder: {original_folder}")
-                                    # 创建分类子目录
                                     if not os.path.exists(raw_folder):
                                         os.makedirs(raw_folder)
                                         logging.info(f"Created subfolder: {raw_folder}")
@@ -205,7 +174,7 @@ class CopyThread(QThread):
                     new_file_path = os.path.join(target_subfolder, new_file_name)
                     counter += 1
 
-                # 拷贝文件并进行哈希校验（原逻辑不变）
+                # 拷贝文件并进行哈希校验
                 try:
                     logging.info(f"Copying {file} to {new_file_path}")
                     shutil.copy2(file_path, new_file_path)
@@ -223,7 +192,7 @@ class CopyThread(QThread):
             progress = int((copied_files / total_files) * 100)
             self.progress_signal.emit(progress)
 
-        # 确保进度条达到 100%（原逻辑不变）
+        # 确保进度条达到 100%
         self.progress_signal.emit(100)
 
         result_msg = f"拷贝完成，生成的文件夹有：{', '.join(created_folders)}"
@@ -237,148 +206,236 @@ class MainWindow(QWidget):
 
     def initUI(self):
         # 设置窗口标题和大小
-        self.setWindowTitle('拷卡并校验')
-        self.setGeometry(300, 300, 800, 600)
+        self.setWindowTitle('拷卡助手')
+        self.setGeometry(300, 300, 800, 600)  # 调整窗口初始尺寸更紧凑
 
-        # 获取系统默认调色板并自动适配主题
+        # 获取系统默认调色板并自动适配主题（优化字体适配）
         system_palette = QApplication.palette()
-        self.setPalette(system_palette)  # 初始使用系统默认调色板
+        self.setPalette(system_palette)
+        # 检查SF Pro字体是否存在（简化字体名称）
+        font_db = QFontDatabase()
+        # 优先使用SF Pro，其次使用macOS通用字体（Helvetica Neue/Arial）
+        preferred_fonts = ['SF Pro', 'Helvetica Neue', 'Arial']
+        main_font = None
+        for font in preferred_fonts:
+            if font in font_db.families():
+                main_font = QFont(font, 12)
+                break
+        if not main_font:
+            main_font = QFont()  # 最终回退到系统默认
+            logging.warning("系统未找到以下字体: SF Pro, Helvetica Neue, Arial，使用系统默认字体")  # 明确提示检查的字体列表
+        QApplication.setFont(main_font)
 
-        # 创建布局
+        # 创建布局（优化：增加主布局边距和控件间距）
         main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(20, 20, 20, 20)  # 四边边距20px
+        main_layout.setSpacing(15)  # 控件间距15px
 
-        # 图片目标目录选择
+        # 通用样式定义（调整输入框高度）
+        input_style = """
+            QLineEdit {
+                border: 1px solid palette(mid);
+                border-radius: 5px;
+                padding: 5px 12px;
+                font-size: 12px;
+                color: palette(window-text);
+                background-color: palette(window);
+            }
+            QLineEdit:focus {
+                border-color: palette(highlight);
+                background-color: palette(window);
+            }
+        """
+
+        # 新增：定义通用按钮样式
+        button_style = """
+            QPushButton {
+                border: 1px solid palette(mid);
+                border-radius: 5px;
+                padding: 5px 16px;
+                font-size: 12px;
+                background-color: palette(base);
+                color: palette(window-text);
+            }
+            QPushButton:hover {
+                border-color: palette(highlight);
+                background-color: palette(alternate-base);
+            }
+        """
+
+        # 图片目标目录选择（优化：标签固定宽度+输入框扩展）
         image_layout = QHBoxLayout()
         image_label = QLabel('图片目标目录:')
-        image_label.setFont(QFont('Arial', 12))
+        image_label.setFixedWidth(100)  # 标签固定宽度对齐
         self.image_input = QLineEdit(image_target_directory)
-        self.image_input.setFont(QFont('Arial', 12))
-        # 使用系统输入框样式（自动适配深浅模式）
-        input_palette = self.image_input.palette()  # 直接使用系统默认输入框调色板
-        self.image_input.setPalette(input_palette)
+        self.image_input.setStyleSheet(input_style)
         image_button = QPushButton('选择目录')
-        image_button.setFont(QFont('Arial', 12))
-        image_button.setStyleSheet("QPushButton { background-color: #05B8CC; color: white; border: none; border-radius: 5px; padding: 5px 10px; }"
-                                    "QPushButton:hover { background-color: #0497AB; }")  # 保留自定义按钮颜色
+        image_button.setStyleSheet(button_style)  # 现在button_style已定义
         image_button.clicked.connect(self.select_image_directory)
         image_layout.addWidget(image_label)
-        image_layout.addWidget(self.image_input)
+        image_layout.addWidget(self.image_input, 1)  # 输入框占1份空间
         image_layout.addWidget(image_button)
 
-        # 视频目标目录选择（样式自动适配）
+        # 视频目标目录选择（样式与图片目录统一）
         video_layout = QHBoxLayout()
         video_label = QLabel('视频目标目录:')
-        video_label.setFont(QFont('Arial', 12))
+        video_label.setFixedWidth(100)
         self.video_input = QLineEdit(video_target_directory)
-        self.video_input.setFont(QFont('Arial', 12))
-        self.video_input.setPalette(input_palette)  # 复用系统输入框样式
+        self.video_input.setStyleSheet(input_style)
         video_button = QPushButton('选择目录')
-        video_button.setFont(QFont('Arial', 12))
-        video_button.setStyleSheet("QPushButton { background-color: #05B8CC; color: white; border: none; border-radius: 5px; padding: 5px 10px; }"
-                                    "QPushButton:hover { background-color: #0497AB; }")
+        video_button.setStyleSheet(button_style)  # 引用已定义的button_style
         video_button.clicked.connect(self.select_video_directory)
         video_layout.addWidget(video_label)
-        video_layout.addWidget(self.video_input)
+        video_layout.addWidget(self.video_input, 1)
         video_layout.addWidget(video_button)
 
-        # SD 卡目录选择（样式自动适配）
+        # SD 卡目录选择（样式统一）
         sd_layout = QHBoxLayout()
         sd_label = QLabel('SD 卡目录:')
-        sd_label.setFont(QFont('Arial', 12))
+        sd_label.setFixedWidth(100)
         self.sd_input = QLineEdit(sd_card_directory)
-        self.sd_input.setFont(QFont('Arial', 12))
+        self.sd_input.setStyleSheet(input_style)
         sd_button = QPushButton('选择目录')
-        sd_button.setFont(QFont('Arial', 12))
-        sd_button.setStyleSheet("QPushButton { background-color: #05B8CC; color: white; border: none; border-radius: 5px; padding: 5px 10px; }"
-                                "QPushButton:hover { background-color: #0497AB; }")
+        sd_button.setStyleSheet(button_style)  # 引用已定义的button_style
         sd_button.clicked.connect(self.select_sd_directory)
         sd_layout.addWidget(sd_label)
-        sd_layout.addWidget(self.sd_input)
+        sd_layout.addWidget(self.sd_input, 1)
         sd_layout.addWidget(sd_button)
 
-        # 活动名称输入（样式自动适配）
+        # 活动名称输入（优化：标签对齐+输入框扩展）
         event_layout = QHBoxLayout()
         event_label = QLabel('活动名称:')
-        event_label.setFont(QFont('Arial', 12))
+        event_label.setFixedWidth(100)
         self.event_input = QLineEdit()
-        self.event_input.setFont(QFont('Arial', 12))
-        self.event_input.setPalette(input_palette)  # 复用系统输入框样式
+        self.event_input.setStyleSheet(input_style)
         event_layout.addWidget(event_label)
-        event_layout.addWidget(self.event_input)
-        main_layout.addLayout(event_layout)
+        event_layout.addWidget(self.event_input, 1)
 
-        # 新增：分开存放RAW和JPG的复选框
+        # 分开存放复选框（最终对齐方案：与其他行标签起始位置完全一致）
         separate_layout = QHBoxLayout()
-        self.separate_raw_checkbox = QCheckBox('分开存放RAW和JPG文件')
-        self.separate_raw_checkbox.setFont(QFont('Arial', 12))
+        # 重置左边距为0（与image_layout/video_layout等子布局保持一致）
+        separate_layout.setContentsMargins(0, 0, 0, 0)
+        # 标题标签固定宽度100px（与"图片目标目录"等标签宽度一致）
+        separate_title = QLabel('高级选项：')
+        separate_title.setFont(main_font)
+        separate_title.setFixedWidth(100)  # 关键：与其他标签宽度一致
+        # 复选框直接跟随标题，不额外添加边距
+        self.separate_raw_checkbox = QCheckBox('RAW和JPG文件分开保存')
+        self.separate_raw_checkbox.setFont(main_font)
+        # 添加顺序：标题+复选框
+        separate_layout.addWidget(separate_title)
         separate_layout.addWidget(self.separate_raw_checkbox)
-        main_layout.addLayout(separate_layout)
 
-        # 日期选择下拉框（使用系统主题样式）
-        date_layout = QHBoxLayout()
-        date_label = QLabel('选择日期:')
-        date_label.setFont(QFont('Arial', 12))
+        # 日期选择布局（调整下拉框高度）
+        date_layout = QHBoxLayout()  # 新增：初始化日期选择布局
+        date_label = QLabel('选择日期:')  # 新增：定义日期标签
+        date_label.setFixedWidth(100)  # 标签固定宽度对齐（与其他标签统一）
         self.date_combo = QComboBox()
-        self.date_combo.setFont(QFont('Arial', 12))
-        # 使用系统主题颜色
-        self.date_combo.setStyleSheet("QComboBox { color: palette(window-text); background-color: palette(base); }"
-                                      "QComboBox QAbstractItemView { color: palette(window-text); background-color: palette(base); }")
-        self.date_combo.addItem("全部日期")
+        self.date_combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid palette(mid);
+                border-radius: 5px;
+                padding: 5px 12px;
+                font-size: 12px;
+                background-color: palette(base);
+                color: palette(window-text);
+            }
+            QComboBox:focus {
+                border-color: palette(highlight);
+            }
+            QComboBox::drop-down {
+                width: 24px;
+                border: none;
+                background: transparent;
+            }
+            QComboBox::down-arrow {
+                image: none;  /* 移除自定义SVG路径 */
+            }
+        """)
+        # 重置为系统默认样式（自动使用标准下拉箭头）
+        self.date_combo.setStyle(QApplication.style())
         date_button = QPushButton('获取日期')
-        date_button.setFont(QFont('Arial', 12))
-        date_button.setStyleSheet("QPushButton { background-color: #05B8CC; color: white; border: none; border-radius: 5px; padding: 5px 10px; }"
-                                  "QPushButton:hover { background-color: #0497AB; }")
+        date_button.setStyleSheet(button_style)
         date_button.clicked.connect(self.get_dates)
         date_layout.addWidget(date_label)
-        date_layout.addWidget(self.date_combo)
+        date_layout.addWidget(self.date_combo, 1)  # 下拉框占1份空间
         date_layout.addWidget(date_button)
 
-        # 进度条（使用系统主题颜色）
+        # 进度条（优化：增加高度+圆角）
         self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        self.progress_bar.setStyleSheet("QProgressBar { border: 2px solid palette(mid); border-radius: 5px; text-align: center; color: palette(window-text); }"
-                                        "QProgressBar::chunk { background-color: palette(highlight); width: 20px; }")
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid palette(midlight);
+                border-radius: 8px;
+                background-color: palette(base);
+                height: 20px;
+            }
+            QProgressBar::chunk {
+                background-color: palette(highlight);
+                border-radius: 7px;
+            }
+        """)
 
-        # 结果显示标签（自动适配文字颜色）
+        # 结果标签（优化：增加内边距+文字颜色）
         self.result_label = QLabel()
-        self.result_label.setFont(QFont('Arial', 12))
+        self.result_label.setFont(QFont('SF Pro', 12))
         self.result_label.setWordWrap(True)
+        self.result_label.setStyleSheet("padding: 10px; color: palette(window-text);")
 
-        # 开始拷贝按钮（保留自定义颜色）
+        # 开始拷贝按钮（优化：强调按钮样式）
         start_button = QPushButton('开始拷贝')
-        start_button.setFont(QFont('Arial', 14, QFont.Bold))
-        start_button.setStyleSheet("QPushButton { background-color: #FFA500; color: white; border: none; border-radius: 5px; padding: 10px 20px; }"
-                                   "QPushButton:hover { background-color: #FF8C00; }")
+        start_button.setFont(QFont('SF Pro', 14, QFont.Medium))
+        start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #007AFF;  /* macOS主题蓝 */
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 12px 24px;
+                margin: 10px 0;
+            }
+            QPushButton:hover {
+                background-color: #0066CC;
+            }
+        """)
         start_button.clicked.connect(self.start_copying)
 
-        # 使用说明书（自动适配背景和文字颜色）
-        instruction_text = """
-使用说明：
-1. 选择图片目标目录：点击“选择目录”按钮，指定图片拷贝的目标文件夹。
-2. 选择视频目标目录：点击“选择目录”按钮，指定视频拷贝的目标文件夹。
-3. 选择 SD 卡目录：点击“选择目录”按钮，指定 SD 卡所在的文件夹。
-4. 输入活动名称：在输入框中输入本次活动的名称，用于生成文件夹名称。
-5. 获取日期：点击“获取日期”按钮，程序将自动获取 SD 卡中文件的日期信息。
-6. 选择日期：从下拉框中选择要拷贝的文件日期，若选择“全部日期”，将拷贝所有日期的文件。
-7. 开始拷贝：点击“开始拷贝”按钮，程序将开始拷贝文件，并在进度条中显示拷贝进度。
-8. 查看结果：拷贝完成后，结果将显示在下方的文本区域。
+        # 使用说明书（提前定义说明文本）
+        instruction_text = """使用说明：
+1. 选择目标目录：分别设置图片和视频的存储路径（默认使用系统图片/视频文件夹）
+2. 选择SD卡目录：指定需要拷贝的SD卡根目录
+3. 输入活动名称：用于生成带日期的目标文件夹（如20240520_公司活动）
+4. 选择日期：点击「获取日期」自动识别SD卡中文件的修改日期，可单选指定日期或选择「全部日期」
+5. 高级选项：勾选「RAW和JPG文件分开保存」会在「原图」目录下自动创建RAW/JPG子文件夹
+6. 开始拷贝：确认设置后点击按钮开始拷贝，进度条会显示当前拷贝进度
 """
+
+        # 使用说明书（主题自适应背景，合并重复定义）
         instruction_label = QTextEdit()
         instruction_label.setReadOnly(True)
-        instruction_label.setFont(QFont('Arial', 10))
-        # 使用系统主题颜色
-        instruction_label.setStyleSheet("QTextEdit { background-color: palette(base); color: palette(window-text); border: none; padding: 10px; }")
-        instruction_label.setText(instruction_text)
+        instruction_label.setFont(QFont('SF Pro', 11))
+        instruction_label.setStyleSheet("""
+            QTextEdit {
+                background-color: palette(window);  /* 系统主窗口背景色（浅色主题为白/深色为深灰） */
+                color: palette(window-text);  /* 系统文字色（与背景自动对比） */
+                border: 1px solid palette(midlight);  /* 系统浅中间色，增强边界 */
+                border-radius: 8px;
+                padding: 15px;
+                opacity: 0.9;  /* 半透明效果 */
+            }
+        """)
+        instruction_label.setText(instruction_text)  # instruction_text 已提前定义
 
-        # 添加布局到主布局
+        # 添加所有控件到主布局（顺序优化）
         main_layout.addLayout(image_layout)
         main_layout.addLayout(video_layout)
         main_layout.addLayout(sd_layout)
         main_layout.addLayout(event_layout)
+        main_layout.addLayout(separate_layout)
         main_layout.addLayout(date_layout)
         main_layout.addWidget(self.progress_bar)
         main_layout.addWidget(self.result_label)
-        main_layout.addWidget(start_button)
+        main_layout.addWidget(start_button, 0, Qt.AlignCenter)  # 按钮居中
         main_layout.addWidget(instruction_label)
 
         self.setLayout(main_layout)

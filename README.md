@@ -47,8 +47,12 @@ python your_script_name.py  # 替换为你的 Python 脚本文件名
 ### 使用步骤
 1. 打开程序后，点击相应的 “选择目录” 按钮，分别指定图片目标目录、视频目标目录和 SD 卡目录。
 2. 在 “活动名称” 输入框中输入本次活动的名称（可选）。
-3. 点击 “开始拷贝” 按钮，程序将开始拷贝文件，并在进度条中实时显示拷贝进度。
-4. 拷贝完成后，程序将在界面上反馈最终生成的文件夹名称。
+3. 选择拷贝类型：勾选“拷贝图片”和/或“拷贝视频”复选框（默认均勾选），至少选择一种类型（否则会提示错误）。
+4. 选择文件分类（可选）：勾选“分开存放RAW和JPG文件”复选框，若勾选，图片文件将按RAW和JPG分别存放在“原图/RAW”和“原图/JPG”子文件夹中。
+5. 点击 “获取日期” 按钮，程序将自动获取 SD 卡中文件的日期信息。
+6. 从日期下拉框中选择要拷贝的文件日期（或选择“全部日期”）。
+7. 点击 “开始拷贝” 按钮，程序将开始拷贝文件，并在进度条中实时显示拷贝进度。
+8. 拷贝完成后，程序将在界面上反馈最终生成的文件夹名称。
 
 ## 代码变更日志
 ### 版本 1.1 - 2025-03-11
@@ -60,12 +64,21 @@ python your_script_name.py  # 替换为你的 Python 脚本文件名
 - 优化代码，避免重复创建文件夹，添加拷卡结束后自动推出 SD 卡的功能。
 - 为代码添加 changelog 注释，方便记录和查看代码的修改历史。
 
-### 后续版本
 ### 版本 1.2 - 2025-05-29
 - 适配了macOS的主题颜色，支持根据系统主题自动切换颜色。
 - 新增了”分开存放RAW和JPG文件“开关，支持拷贝过程中分开存放两种文件
+#### 优化调整：
 
+1. 优化了macOS的UI布局和样式，主要调整了控件间距、字体统一性、按钮样式和布局紧凑度，使用统一的主题颜色，Windows应该也可以，待测试……
+  - 字体统一 ：使用系统默认字体，提升系统适配性；
+  - 布局紧凑性 ：调整主布局边距和控件间距，避免元素过于拥挤；
+  - 样式统一 ：统一输入框和按钮样式，解决原有按钮颜色不一致问题；
+  - 对齐优化 ：所有标签固定宽度，输入框和下拉框使用扩展填充，保证列对齐；
+  - 重点突出 ："开始拷贝"按钮使用主题蓝色，增大内边距并居中显示，强化操作入口；
+  - 细节调整 ：进度条增加高度和圆角，复选框与标签列对齐，提升视觉一致性；
+  image.png
 
+### 后续版本
 - 不断增加新功能，如输入活动名称、修复进度条问题、支持更多文件格式等，具体变更内容可查看代码中的 changelog 注释。
 
 ## 贡献与反馈
@@ -119,10 +132,10 @@ python your_script_name.py  # Replace with the name of your Python script file
 - Adds changelog comments to the code for easy recording and viewing of the code's modification history.
 
 ### Subsequent Versions
-- Continuously adds new functions, such as the ability to enter event names, fixes progress bar issues, and supports more file formats. For specific change details, please refer to the changelog comments in the code.
+- Continuously adds new functions, such as the ability to input event names, fixes progress bar issues, and supports more file formats. For specific change details, please refer to the changelog comments in the code.
 
 ## Contribution and Feedback
 If you have any suggestions for this project, find bugs, or want to contribute code, please feel free to submit issues or pull requests on GitHub. We welcome all forms of contributions to make this project better!
 
 ## License
-This project is licensed under the [MIT License](https://opensource.org/licenses/MIT). Please refer to the `LICENSE` file for details. 
+This project is licensed under the [MIT License](https://opensource.org/licenses/MIT). Please refer to the `LICENSE` file for details.
