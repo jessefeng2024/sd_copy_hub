@@ -566,10 +566,11 @@ class MainWindow(QWidget):
         dialog.exec_()  # 模态显示对话框（阻塞主窗口）
 
 if __name__ == '__main__':
-    app = QApplication([])
+    import sys
+    app = QApplication(sys.argv)  # 必须先创建 QApplication 实例
     window = MainWindow()
     window.show()
-    app.exec_()
+    sys.exit(app.exec_())  # 启动事件循环
 
 
 class DirectorySelector(QWidget):
@@ -618,60 +619,14 @@ class DirectorySelector(QWidget):
         self.theme_combo.currentIndexChanged.connect(self.change_theme)
         theme_layout.addWidget(theme_label)
         theme_layout.addWidget(self.theme_combo, 1)
-        main_layout.addLayout(theme_layout)
-
-    def change_theme(self, index):
-        """根据选择切换主题"""
-        palette = QPalette()
-        if index == 1:  # 深色主题
-            dark_color = QColor(53, 53, 53)
-            palette.setColor(QPalette.Window, dark_color)
-            palette.setColor(QPalette.WindowText, Qt.white)
-            palette.setColor(QPalette.Base, QColor(25, 25, 25))
-            palette.setColor(QPalette.AlternateBase, dark_color)
-            palette.setColor(QPalette.Text, Qt.white)
-            palette.setColor(QPalette.Button, dark_color)
-            palette.setColor(QPalette.ButtonText, Qt.white)
-        elif index == 2:  # 浅色主题
-            light_color = QColor(240, 240, 240)
-            palette.setColor(QPalette.Window, light_color)
-            palette.setColor(QPalette.WindowText, Qt.black)
-            palette.setColor(QPalette.Base, QColor(255, 255, 255))
-            palette.setColor(QPalette.AlternateBase, light_color)
-            palette.setColor(QPalette.Text, Qt.black)
-            palette.setColor(QPalette.Button, light_color)
-            palette.setColor(QPalette.ButtonText, Qt.black)
-        else:  # 系统默认
-            palette = QApplication.palette()
-        self.setPalette(palette)  # 应用全局调色板
-
-    def initUI(self):
-        # 使用封装后的目录选择组件
-        self.image_selector = DirectorySelector('图片目标目录:', image_target_directory)
-        self.video_selector = DirectorySelector('视频目标目录:', video_target_directory)
-        self.sd_selector = DirectorySelector('SD 卡目录:', sd_card_directory)
-
-        # 连接按钮点击事件
-        self.image_selector.button.clicked.connect(self.select_image_directory)
-        self.video_selector.button.clicked.connect(self.select_video_directory)
-        self.sd_selector.button.clicked.connect(self.select_sd_directory)
-
-        # 将组件添加到主布局
-        main_layout.addWidget(self.image_selector)
-        main_layout.addWidget(self.video_selector)
-        main_layout.addWidget(self.sd_selector)
-
-        # 主题选择布局
-        theme_layout = QHBoxLayout()
-        theme_label = QLabel('选择主题:')
-        theme_label.setFixedWidth(100)
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItems(['系统默认', '深色主题', '浅色主题'])
-        self.theme_combo.setStyleSheet(input_style)  # 复用输入框样式
-        self.theme_combo.currentIndexChanged.connect(self.change_theme)
-        theme_layout.addWidget(theme_label)
-        theme_layout.addWidget(self.theme_combo, 1)
-        main_layout.addLayout(theme_layout)
+        # 将主题布局调整到目录选择之后，更靠前的位置
+        main_layout.addLayout(image_layout)
+        main_layout.addLayout(video_layout)
+        main_layout.addLayout(sd_layout)
+        main_layout.addLayout(theme_layout)  # 调整到此处
+        main_layout.addLayout(event_layout)
+        main_layout.addLayout(separate_layout)
+        main_layout.addLayout(date_layout)
 
     def change_theme(self, index):
         """根据选择切换主题"""
