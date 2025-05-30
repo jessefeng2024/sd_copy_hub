@@ -10,12 +10,10 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QFileDialog, QProgressBar, QComboBox, QTextEdit, QMessageBox,
-    QCheckBox
+    QCheckBox, QDialog
 )
 from PyQt5.QtGui import QFont, QPalette, QColor, QFontDatabase
-from PyQt5.QtCore import QThread, pyqtSignal, Qt  # 新增Qt导入
-
-# 配置日志记录
+from PyQt5.QtCore import QThread, pyqtSignal, Qt
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 读取配置文件
@@ -199,6 +197,42 @@ class CopyThread(QThread):
         self.result_signal.emit(result_msg)
 
 
+class InstructionDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("使用说明")
+        self.setGeometry(400, 400, 600, 400)  # 对话框位置和尺寸
+        
+        # 初始化布局和说明文本
+        layout = QVBoxLayout()
+        instruction_text = """使用说明：
+1. 选择目标目录：分别设置图片和视频的存储路径（默认使用系统图片/视频文件夹）
+2. 选择SD卡目录：指定需要拷贝的SD卡根目录
+3. 输入活动名称：用于生成带日期的目标文件夹（如20240520_公司活动）
+4. 选择日期：点击「获取日期」自动识别SD卡中文件的修改日期，可单选指定日期或选择「全部日期」
+5. 高级选项：勾选「RAW和JPG文件分开保存」会在「原图」目录下自动创建RAW/JPG子文件夹
+6. 开始拷贝：确认设置后点击按钮开始拷贝，进度条会显示当前拷贝进度
+"""
+        
+        # 使用说明文本框（与原样式保持一致）
+        instruction_label = QTextEdit()
+        instruction_label.setReadOnly(True)
+        instruction_label.setFont(QFont('SF Pro', 11))
+        instruction_label.setStyleSheet("""
+            QTextEdit {
+                background-color: palette(window);
+                color: palette(window-text);
+                border: 1px solid palette(midlight);
+                border-radius: 8px;
+                padding: 15px;
+                opacity: 0.9;
+            }
+        """)
+        instruction_label.setText(instruction_text)
+        layout.addWidget(instruction_label)
+        self.setLayout(layout)
+
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -361,8 +395,9 @@ class MainWindow(QWidget):
         date_layout.addWidget(self.date_combo, 1)  # 下拉框占1份空间
         date_layout.addWidget(date_button)
 
-        # 进度条（优化：增加高度+圆角）
+        # 进度条（优化：增加高度+圆角，初始隐藏）
         self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)  # 初始隐藏
         self.progress_bar.setStyleSheet("""
             QProgressBar {
                 border: 1px solid palette(midlight);
@@ -382,9 +417,9 @@ class MainWindow(QWidget):
         self.result_label.setWordWrap(True)
         self.result_label.setStyleSheet("padding: 10px; color: palette(window-text);")
 
-        # 开始拷贝按钮（优化：强调按钮样式）
+        # 开始拷贝按钮（优化：强调按钮样式，调整尺寸）
         start_button = QPushButton('开始拷贝')
-        start_button.setFont(QFont('SF Pro', 14, QFont.Medium))
+        start_button.setFont(QFont('SF Pro', 13, QFont.Medium))  # 原14px → 13px
         start_button.setStyleSheet("""
             QPushButton {
                 background-color: #007AFF;  /* macOS主题蓝 */
@@ -392,7 +427,7 @@ class MainWindow(QWidget):
                 border: none;
                 border-radius: 8px;
                 padding: 12px 24px;
-                margin: 10px 0;
+                margin: 10px 0;  /* 原10px 0 → 上下边距减小为5px */
             }
             QPushButton:hover {
                 background-color: #0066CC;
@@ -436,7 +471,12 @@ class MainWindow(QWidget):
         main_layout.addWidget(self.progress_bar)
         main_layout.addWidget(self.result_label)
         main_layout.addWidget(start_button, 0, Qt.AlignCenter)  # 按钮居中
-        main_layout.addWidget(instruction_label)
+
+        # 添加使用说明入口按钮（放置在开始拷贝按钮下方）
+        instruction_button = QPushButton('使用说明')
+        instruction_button.setStyleSheet(button_style)  # 使用已定义的通用按钮样式
+        instruction_button.clicked.connect(self.show_instruction_dialog)
+        main_layout.addWidget(instruction_button, 0, Qt.AlignRight)  # 按钮右对齐
 
         self.setLayout(main_layout)
 
@@ -487,19 +527,25 @@ class MainWindow(QWidget):
             self.date_combo.addItem(date)
 
     def start_copying(self):
+        # 显示进度条
+        self.progress_bar.setVisible(True)
+        # 清空上次结果
+        self.result_label.setText("")
+        
+        # 获取用户输入参数
         image_target = self.image_input.text()
         video_target = self.video_input.text()
         sd_card = self.sd_input.text()
         event_name = self.event_input.text()
-        selected_date = self.date_combo.currentText()
-        # 新增：获取复选框状态
+        selected_dates = [self.date_combo.currentText()] if self.date_combo.currentText() != "全部日期" else []
         separate_raw = self.separate_raw_checkbox.isChecked()
-        if selected_date == "全部日期":
-            selected_dates = []
-        else:
-            selected_dates = [selected_date]
-
-        # 传递新参数到拷贝线程
+    
+        # 校验输入（补充基础校验逻辑）
+        if not image_target or not video_target or not sd_card:
+            QMessageBox.warning(self, "错误", "请至少选择图片目标目录、视频目标目录和SD卡目录")
+            return
+    
+        # 启动拷贝线程
         self.copy_thread = CopyThread(image_target, video_target, sd_card, event_name, selected_dates, separate_raw)
         self.copy_thread.progress_signal.connect(self.update_progress)
         self.copy_thread.result_signal.connect(self.show_result)
@@ -514,6 +560,10 @@ class MainWindow(QWidget):
         else:
             self.result_label.setText(result)
 
+    def show_instruction_dialog(self):
+        """显示使用说明对话框"""
+        dialog = InstructionDialog(self)
+        dialog.exec_()  # 模态显示对话框（阻塞主窗口）
 
 if __name__ == '__main__':
     app = QApplication([])
