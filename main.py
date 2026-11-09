@@ -1,655 +1,779 @@
+import sys
 import os
 import datetime
 import shutil
 import hashlib
 import logging
-from PIL import Image
-from PIL.ExifTags import TAGS
-import configparser
 from pathlib import Path
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QFileDialog, QProgressBar, QComboBox, QTextEdit, QMessageBox,
-    QCheckBox, QDialog
-)
-from PyQt5.QtGui import QFont, QPalette, QColor, QFontDatabase
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
+                             QLabel, QPushButton, QLineEdit, QFileDialog, 
+                             QProgressBar, QComboBox, QFrame)
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings, QRectF
+from PyQt5.QtGui import (QPainter, QColor, QLinearGradient, QRadialGradient, 
+                         QPainterPath, QPen)
 
-# 读取配置文件
-config = configparser.ConfigParser()
-config.read('config.ini')
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# 获取用户图片和视频文件夹路径
-def get_user_pictures_folder():
-    if os.name == 'nt':  # Windows 系统
-        return os.path.join(os.environ['USERPROFILE'], 'Pictures')
-    elif os.name == 'posix':  # macOS 或 Linux 系统
-        return os.path.join(str(Path.home()), 'Pictures')
-    return None
+# 支持主流相机 RAW 与视频格式
+IMAGE_EXT = ('.jpg', '.jpeg', '.png', '.heic', '.heif', '.raw', '.nef', '.cr2', '.cr3', 
+             '.arw', '.dng', '.raf', '.orf', '.pef', '.srw', '.x3f')
+VIDEO_EXT = ('.mp4', '.avi', '.mov', '.mxf', '.mts', '.m4v')
 
-def get_user_videos_folder():
-    if os.name == 'nt':  # Windows 系统
-        return os.path.join(os.environ['USERPROFILE'], 'Videos')
-    elif os.name == 'posix':  # macOS 或 Linux 系统
-        return os.path.join(str(Path.home()), 'Movies')
-    return None
 
-# 获取默认路径
-image_target_directory = config.get('Paths', 'image_target_directory', fallback=get_user_pictures_folder())
-video_target_directory = config.get('Paths', 'video_target_directory', fallback=get_user_videos_folder())
-sd_card_directory = config.get('Paths', 'sd_card_directory', fallback='/Volumes/Untitled')
+class ScanThread(QThread):
+    """异步扫描线程：智能聚类并缓存文件列表，过滤 macOS 隐藏文件"""
+    scan_done_signal = pyqtSignal(list, list)
+    
+    def __init__(self, sd_card):
+        super().__init__()
+        self.sd_card = sd_card
+
+    def run(self):
+        if not os.path.exists(self.sd_card):
+            self.scan_done_signal.emit([], [])
+            return
+
+        cached_files = []
+        for root, dirs, files in os.walk(self.sd_card):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for file in files:
+                if file.startswith('.'):
+                    continue
+                if file.lower().endswith(IMAGE_EXT + VIDEO_EXT):
+                    full_path = os.path.join(root, file)
+                    try:
+                        mtime = os.path.getmtime(full_path)
+                        dt = datetime.datetime.fromtimestamp(mtime)
+                        cached_files.append((full_path, dt))
+                    except Exception:
+                        continue
+        
+        if not cached_files:
+            self.scan_done_signal.emit([], [])
+            return
+
+        cached_files.sort(key=lambda x: x[1])
+        
+        groups = []
+        current_group = [cached_files[0][1]]
+        for i in range(1, len(cached_files)):
+            f_time = cached_files[i][1]
+            if (f_time - current_group[-1]).total_seconds() <= 7200:
+                current_group.append(f_time)
+            else:
+                groups.append(self.format_group(current_group))
+                current_group = [f_time]
+        groups.append(self.format_group(current_group))
+        
+        self.scan_done_signal.emit(groups, cached_files)
+
+    def format_group(self, group):
+        start, end = group[0], group[-1]
+        if start.date() == end.date():
+            return f"{start.strftime('%Y%m%d')}_{start.strftime('%H%M')}-{end.strftime('%H%M')}"
+        return f"{start.strftime('%Y%m%d_%H%M')}-{end.strftime('%Y%m%d_%H%M')}"
+
 
 class CopyThread(QThread):
+    """安全高速拷贝线程：边拷边算 Hash + 防重复拷贝 + 视频自动重命名"""
     progress_signal = pyqtSignal(int)
-    result_signal = pyqtSignal(str)
+    status_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(str)
 
-    def __init__(self, image_target, video_target, sd_card, event_name, selected_dates, separate_raw):
+    def __init__(self, image_target, video_target, sd_card, event_name, selected_date, file_type, cached_files=None):
         super().__init__()
         self.image_target = image_target
         self.video_target = video_target
         self.sd_card = sd_card
-        self.event_name = event_name
-        self.selected_dates = selected_dates
-        # 新增：接收是否分开存放的参数
-        self.separate_raw = separate_raw
+        self.event_name = event_name.strip()
+        self.selected_date = selected_date
+        self.file_type = file_type
+        self.cached_files = cached_files or []
+
+    def copy_and_verify(self, src, dst):
+        src_hash = hashlib.sha256()
+        buf_size = 1024 * 1024  # 1MB Buffer
+        
+        with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
+            while chunk := fsrc.read(buf_size):
+                src_hash.update(chunk)
+                fdst.write(chunk)
+        shutil.copystat(src, dst)
+
+        dst_hash = hashlib.sha256()
+        with open(dst, 'rb') as fdst:
+            while chunk := fdst.read(buf_size):
+                dst_hash.update(chunk)
+
+        return src_hash.hexdigest() == dst_hash.hexdigest()
+
+    def parse_date_range(self, dr_str):
+        parts = dr_str.strip().split('-')
+        s_str = parts[0]
+        e_str = s_str[:9] + parts[1] if len(parts[1]) == 4 else parts[1]
+        start_dt = datetime.datetime.strptime(s_str, '%Y%m%d_%H%M')
+        end_dt = datetime.datetime.strptime(e_str, '%Y%m%d_%H%M') + datetime.timedelta(minutes=1)
+        return start_dt, end_dt, start_dt.strftime('%Y%m%d')
 
     def run(self):
-        # 定义图片文件的扩展名，包含更多 RAW 格式
-        image_extensions = (
-            '.jpg', '.jpeg', '.png', '.raw', '.nef', '.cr2', '.CR3',
-            '.arw',  # 索尼 RAW 格式
-            '.dng',  # 通用 RAW 格式
-            '.raf',  # 富士 RAW 格式
-            '.orf',  # 奥林巴斯 RAW 格式
-            '.pef',  # 宾得 RAW 格式
-            '.srw',  # 三星 RAW 格式
-            '.x3f'   # 适马 RAW 格式
-        )
-        # 单独定义RAW格式扩展名（需要和image_extensions保持一致）
-        raw_extensions = ('.raw', '.nef', '.cr2', '.CR3', '.arw', '.dng', '.raf', '.orf', '.pef', '.srw', '.x3f')
-        video_extensions = ('.mp4', '.avi', '.mov')
-
-        all_files = []
-        for root, dirs, files in os.walk(self.sd_card):
-            logging.debug(f"Processing directory: {root}")
-            for file in files:
-                file_path = os.path.join(root, file)
-                all_files.append(file_path)
-                # 增加调试信息，输出每个文件的扩展名
-                file_ext = os.path.splitext(file)[1].lower()
-                logging.debug(f"Found file: {file}, extension: {file_ext}")
-
-        total_files = len(all_files)
-        copied_files = 0
-        created_folders = set()
-
-        if total_files == 0:
-            self.result_signal.emit("SD 卡目录中没有可用的图片或视频文件，请检查路径。")
-            return
-
-        for file_path in all_files:
-            file = os.path.basename(file_path)
-            lower_file = file.lower()
-            is_image = False
-            is_video = False
-            for ext in image_extensions:
-                if lower_file.endswith(ext.lower()):
-                    is_image = True
-                    break
-            for ext in video_extensions:
-                if lower_file.endswith(ext.lower()):
-                    is_video = True
-                    break
-
-            if is_image or is_video:
-                try:
-                    date_taken = datetime.datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%Y%m%d')
-                    if self.selected_dates and date_taken not in self.selected_dates:
+        if not self.cached_files:
+            self.status_signal.emit("正在读取 SD 卡文件列表...")
+            for root, dirs, files in os.walk(self.sd_card):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                for f in files:
+                    if f.startswith('.'):
                         continue
-                except Exception as e:
-                    logging.error(f"Failed to get modification time for {file}: {e}")
+                    if f.lower().endswith(IMAGE_EXT + VIDEO_EXT):
+                        full_path = os.path.join(root, f)
+                        try:
+                            dt = datetime.datetime.fromtimestamp(os.path.getmtime(full_path))
+                            self.cached_files.append((full_path, dt))
+                        except Exception:
+                            continue
+
+        time_filter = None
+        session_date_prefix = None
+        if self.selected_date and self.selected_date != "全部日期":
+            try:
+                start_dt, end_dt, session_date_prefix = self.parse_date_range(self.selected_date)
+                time_filter = (start_dt, end_dt)
+            except Exception as e:
+                logging.error(f"解析日期区间失败: {e}")
+
+        final_list = []
+        for f_path, f_time in self.cached_files:
+            l_f = f_path.lower()
+            is_img, is_vid = l_f.endswith(IMAGE_EXT), l_f.endswith(VIDEO_EXT)
+            
+            if (self.file_type == "仅图片" and not is_img) or \
+               (self.file_type == "仅视频" and not is_vid) or \
+               (not is_img and not is_vid):
+                continue
+
+            if time_filter:
+                if not (time_filter[0] <= f_time < time_filter[1]):
                     continue
 
-                if is_image:
-                    target_dir = self.image_target
-                    logging.debug(f"File {file} identified as an image.")
-                elif is_video:
-                    target_dir = self.video_target
-                    logging.debug(f"File {file} identified as a video.")
+            final_list.append((f_path, f_time, is_img, is_vid))
 
-                logging.debug(f"Processing file: {file}")
+        if not final_list:
+            self.finished_signal.emit("提示：所选场次或过滤条件下没有找到文件")
+            self.progress_signal.emit(100)
+            return
 
-                # 创建包含活动名称的文件夹
-                folder_name = f'{date_taken}_{self.event_name}'
-                folder_path = os.path.join(target_dir, folder_name)
-                if folder_path not in created_folders:
-                    if not os.path.exists(folder_path):
-                        try:
-                            os.makedirs(folder_path)
-                            logging.info(f"Created folder: {folder_path}")
-                            if is_image:
-                                # 仅创建"原图"子目录（移除"选择"目录创建）
-                                original_folder = os.path.join(folder_path, '原图')
-                                if not os.path.exists(original_folder):
-                                    os.makedirs(original_folder)
-                                    logging.info(f"Created subfolder: {original_folder}")
-                                # 仅勾选时创建RAW/JPG子目录
-                                if self.separate_raw:
-                                    raw_folder = os.path.join(original_folder, 'RAW')
-                                    jpg_folder = os.path.join(original_folder, 'JPG')
-                                    if not os.path.exists(raw_folder):
-                                        os.makedirs(raw_folder)
-                                        logging.info(f"Created subfolder: {raw_folder}")
-                                    if not os.path.exists(jpg_folder):
-                                        os.makedirs(jpg_folder)
-                                        logging.info(f"Created subfolder: {jpg_folder}")
-                        except Exception as e:
-                            logging.error(f"Failed to create folder {folder_path}: {e}")
-                            continue
-                    created_folders.add(folder_path)
+        total = len(final_list)
+        copied_count = 0
+        skipped_count = 0
+        failed_count = 0
 
-                # 处理文件名重复情况
-                new_file_name = file
-                file_ext = os.path.splitext(file)[1].lower()
-                # 区分RAW和JPG存储路径
-                if is_image:
-                    # 新增：根据复选框状态选择目标子文件夹
-                    if self.separate_raw:
-                        if file_ext in raw_extensions:
-                            target_subfolder = os.path.join(folder_path, '原图', 'RAW')
-                        else:
-                            target_subfolder = os.path.join(folder_path, '原图', 'JPG')
-                    else:
-                        target_subfolder = os.path.join(folder_path, '原图')  # 不分类时直接存到“原图”
+        for idx, (f_path, f_time, is_img, is_vid) in enumerate(final_list, 1):
+            filename = os.path.basename(f_path)
+            self.status_signal.emit(f"正在导入 ({idx}/{total}): {filename}")
+            
+            try:
+                base = self.image_target if is_img else self.video_target
+                date_str = session_date_prefix if session_date_prefix else f_time.strftime('%Y%m%d')
+                event_suffix = f"_{self.event_name}" if self.event_name else ""
+                f_folder = f"{date_str}{event_suffix}"
+                dest_dir = os.path.join(base, f_folder)
+                
+                sub_dir = os.path.join(dest_dir, '原图') if is_img else dest_dir
+                os.makedirs(sub_dir, exist_ok=True)
+                if is_img:
+                    os.makedirs(os.path.join(dest_dir, '选择'), exist_ok=True)
+
+                if is_vid:
+                    ext = os.path.splitext(f_path)[1]
+                    new_name = f"vid_{f_time.strftime('%Y%m%d%H%M%S')}{ext}"
                 else:
-                    target_subfolder = folder_path
-                new_file_path = os.path.join(target_subfolder, new_file_name)
-                counter = 1
-                while os.path.exists(new_file_path):
-                    base_name, ext = os.path.splitext(file)
-                    new_file_name = f'{base_name}_{counter}{ext}'
-                    new_file_path = os.path.join(target_subfolder, new_file_name)
-                    counter += 1
+                    new_name = filename
 
-                # 拷贝文件并进行哈希校验
-                try:
-                    logging.info(f"Copying {file} to {new_file_path}")
-                    shutil.copy2(file_path, new_file_path)
-                    with open(file_path, 'rb') as f1, open(new_file_path, 'rb') as f2:
-                        hash1 = hashlib.sha256(f1.read()).hexdigest()
-                        hash2 = hashlib.sha256(f2.read()).hexdigest()
-                        if hash1 != hash2:
-                            logging.error(f'哈希校验失败: {file}')
-                        else:
-                            logging.info(f'成功拷贝: {file}')
-                except Exception as e:
-                    logging.error(f'拷贝文件时出错: {file}, 错误信息: {e}')
+                dest_path = os.path.join(sub_dir, new_name)
+                
+                already_copied = False
+                count = 1
+                while os.path.exists(dest_path):
+                    if os.path.getsize(f_path) == os.path.getsize(dest_path):
+                        already_copied = True
+                        break
+                    n, e = os.path.splitext(new_name)
+                    dest_path = os.path.join(sub_dir, f"{n}_{count}{e}")
+                    count += 1
 
-            copied_files += 1
-            progress = int((copied_files / total_files) * 100)
-            self.progress_signal.emit(progress)
+                if already_copied:
+                    skipped_count += 1
+                else:
+                    if self.copy_and_verify(f_path, dest_path):
+                        copied_count += 1
+                    else:
+                        os.remove(dest_path)
+                        failed_count += 1
+                        logging.error(f"文件校验失败，已删除: {dest_path}")
 
-        # 确保进度条达到 100%
-        self.progress_signal.emit(100)
+            except Exception as e:
+                failed_count += 1
+                logging.error(f"处理文件 {f_path} 出错: {e}")
 
-        result_msg = f"拷贝完成，生成的文件夹有：{', '.join(created_folders)}"
-        self.result_signal.emit(result_msg)
+            self.progress_signal.emit(int((idx / total) * 100))
+
+        summary_parts = [f"成功导入 {copied_count} 个"]
+        if skipped_count > 0:
+            summary_parts.append(f"跳过已存在 {skipped_count} 个")
+        if failed_count > 0:
+            summary_parts.append(f"失败 {failed_count} 个")
+        self.finished_signal.emit("✨ 任务完成：" + "，".join(summary_parts))
 
 
-class InstructionDialog(QDialog):
+class GlassCard(QFrame):
+    """自定义毛玻璃卡片：无离屏副作用的自绘阴影 + 半透明磨砂层 + 高光折射边框"""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("使用说明")
-        self.setGeometry(400, 400, 600, 400)  # 对话框位置和尺寸
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # 预留底部阴影绘制空间
+        rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -4.0)
+
+        # 1. 绘制柔和底部投影（替代容易引发布局挤压的 QGraphicsDropShadowEffect）
+        shadow_rect = rect.translated(0, 3.0)
+        shadow_path = QPainterPath()
+        shadow_path.addRoundedRect(shadow_rect, 14, 14)
+        painter.fillPath(shadow_path, QColor(0, 0, 0, 70))
+
+        # 2. 玻璃主体填充
+        path = QPainterPath()
+        path.addRoundedRect(rect, 14, 14)
+        bg_grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        bg_grad.setColorAt(0.0, QColor(255, 255, 255, 26))
+        bg_grad.setColorAt(0.5, QColor(255, 255, 255, 14))
+        bg_grad.setColorAt(1.0, QColor(255, 255, 255, 8))
+        painter.fillPath(path, bg_grad)
+
+        # 3. 玻璃边缘高光折射
+        border_grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        border_grad.setColorAt(0.0, QColor(255, 255, 255, 110))
+        border_grad.setColorAt(0.4, QColor(255, 255, 255, 30))
+        border_grad.setColorAt(1.0, QColor(255, 255, 255, 12))
         
-        # 初始化布局和说明文本
-        layout = QVBoxLayout()
-        instruction_text = """使用说明：
-1. 选择目标目录：分别设置图片和视频的存储路径（默认使用系统图片/视频文件夹）
-2. 选择SD卡目录：指定需要拷贝的SD卡根目录
-3. 输入活动名称：用于生成带日期的目标文件夹（如20240520_公司活动）
-4. 选择日期：点击「获取日期」自动识别SD卡中文件的修改日期，可单选指定日期或选择「全部日期」
-5. 高级选项：勾选「RAW和JPG文件分开保存」会在「原图」目录下自动创建RAW/JPG子文件夹
-6. 开始拷贝：确认设置后点击按钮开始拷贝，进度条会显示当前拷贝进度
-"""
-        
-        # 使用说明文本框（与原样式保持一致）
-        instruction_label = QTextEdit()
-        instruction_label.setReadOnly(True)
-        instruction_label.setFont(QFont('SF Pro', 11))
-        instruction_label.setStyleSheet("""
-            QTextEdit {
-                background-color: palette(window);
-                color: palette(window-text);
-                border: 1px solid palette(midlight);
-                border-radius: 8px;
-                padding: 15px;
-                opacity: 0.9;
-            }
-        """)
-        instruction_label.setText(instruction_text)
-        layout.addWidget(instruction_label)
-        self.setLayout(layout)
+        pen = QPen(border_grad, 1.2)
+        painter.setPen(pen)
+        painter.drawPath(path)
 
 
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
+        self.settings = QSettings("FengC_Work", "SDCopyHub")
+        self.cached_files = []
         self.initUI()
 
+    def paintEvent(self, event):
+        """绘制深空暗夜底色与流光弥散极光背景"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
+        base_grad = QLinearGradient(0, 0, w, h)
+        base_grad.setColorAt(0.0, QColor(11, 15, 27))
+        base_grad.setColorAt(0.5, QColor(18, 23, 40))
+        base_grad.setColorAt(1.0, QColor(10, 12, 22))
+        painter.fillRect(self.rect(), base_grad)
+
+        orb1 = QRadialGradient(w * 0.15, h * 0.18, w * 0.55)
+        orb1.setColorAt(0.0, QColor(0, 210, 255, 75))
+        orb1.setColorAt(0.5, QColor(0, 140, 255, 25))
+        orb1.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect(), orb1)
+
+        orb2 = QRadialGradient(w * 0.88, h * 0.82, w * 0.6)
+        orb2.setColorAt(0.0, QColor(140, 60, 255, 80))
+        orb2.setColorAt(0.5, QColor(90, 30, 200, 30))
+        orb2.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect(), orb2)
+
+        orb3 = QRadialGradient(w * 0.65, h * 0.38, w * 0.4)
+        orb3.setColorAt(0.0, QColor(255, 50, 160, 45))
+        orb3.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect(), orb3)
+
+    def create_divider(self):
+        div = QFrame()
+        div.setObjectName("glassDivider")
+        div.setFrameShape(QFrame.HLine)
+        div.setFixedHeight(1)
+        return div
+
     def initUI(self):
-        # 设置窗口标题和大小
-        self.setWindowTitle('拷卡助手')
-        self.setGeometry(300, 300, 700, 400)  # 调整窗口初始尺寸更紧凑
-
-        # 获取系统默认调色板并自动适配主题（优化字体适配）
-        system_palette = QApplication.palette()
-        self.setPalette(system_palette)
-        # 检查SF Pro字体是否存在（简化字体名称）
-        font_db = QFontDatabase()
-        # 优先使用SF Pro，其次使用macOS通用字体（Helvetica Neue/Arial）
-        preferred_fonts = ['SF Pro', 'Helvetica Neue', 'Arial']
-        main_font = None
-        for font in preferred_fonts:
-            if font in font_db.families():
-                main_font = QFont(font, 12)
-                break
-        if not main_font:
-            main_font = QFont()  # 最终回退到系统默认
-            logging.warning("系统未找到以下字体: SF Pro, Helvetica Neue, Arial，使用系统默认字体")  # 明确提示检查的字体列表
-        QApplication.setFont(main_font)
-
-        # 创建布局（优化：增加主布局边距和控件间距）
-        main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(20, 20, 20, 20)  # 四边边距20px
-        main_layout.setSpacing(15)  # 控件间距15px
-
-        # 通用样式定义（调整输入框高度）
-        input_style = """
-            QLineEdit {
-                border: 1px solid palette(mid);
-                border-radius: 5px;
-                padding: 5px 12px;
+        self.setWindowTitle('SD Copy Hub · Glass Edition')
+        self.setMinimumSize(860, 620)
+        
+        # 样式表：使用水平 padding，垂直方向由 FixedHeight 保证文字完全居中不裁切
+        self.setStyleSheet("""
+            QWidget {
+                font-family: 'PingFang SC', -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+                color: #F8FAFC;
+                font-size: 13px;
+            }
+            QLabel {
+                background: transparent;
+                color: #E2E8F0;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QLabel#titleLabel {
+                font-size: 24px;
+                font-weight: 800;
+                color: #FFFFFF;
+            }
+            QLabel#badgeLabel {
+                font-size: 11px;
+                font-weight: 700;
+                color: #38BDF8;
+                background-color: rgba(56, 189, 248, 25);
+                border: 1px solid rgba(56, 189, 248, 80);
+                border-radius: 9px;
+                padding: 3px 10px;
+            }
+            QLabel#subtitleLabel {
                 font-size: 12px;
-                color: palette(window-text);
-                background-color: palette(window);
+                color: #94A3B8;
+                font-weight: 400;
+            }
+            QLabel#sectionHeader {
+                font-size: 12px;
+                font-weight: 600;
+                color: #94A3B8;
+                padding-left: 4px;
+                letter-spacing: 0.6px;
+            }
+            QFrame#glassDivider {
+                background-color: rgba(255, 255, 255, 18);
+                border: none;
+            }
+            /* 输入框：取消垂直 padding 防止挤压字体，仅保留左右内边距 */
+            QLineEdit {
+                padding: 0px 12px;
+                border: 1px solid rgba(255, 255, 255, 35);
+                border-radius: 8px;
+                background-color: rgba(15, 23, 42, 120);
+                color: #FFFFFF;
+                font-size: 13px;
+                selection-background-color: #00A8FF;
+            }
+            QLineEdit:hover {
+                border: 1px solid rgba(255, 255, 255, 70);
+                background-color: rgba(15, 23, 42, 150);
             }
             QLineEdit:focus {
-                border-color: palette(highlight);
-                background-color: palette(window);
+                border: 1.5px solid #38BDF8;
+                background-color: rgba(15, 23, 42, 190);
             }
-        """
-
-        # 新增：定义通用按钮样式
-        button_style = """
+            /* 次级按钮：取消垂直 padding，依靠固定高度居中文字 */
             QPushButton {
-                border: 1px solid palette(mid);
-                border-radius: 5px;
-                padding: 5px 16px;
-                font-size: 12px;
-                background-color: palette(base);
-                color: palette(window-text);
+                background-color: rgba(255, 255, 255, 22);
+                color: #F8FAFC;
+                border: 1px solid rgba(255, 255, 255, 45);
+                border-radius: 8px;
+                padding: 0px 16px;
+                font-size: 13px;
+                font-weight: 600;
             }
             QPushButton:hover {
-                border-color: palette(highlight);
-                background-color: palette(alternate-base);
+                background-color: rgba(255, 255, 255, 40);
+                border-color: rgba(255, 255, 255, 90);
             }
-        """
-
-        # 图片目标目录选择（优化：标签固定宽度+输入框扩展）
-        image_layout = QHBoxLayout()
-        image_label = QLabel('图片目标目录:')
-        image_label.setFixedWidth(100)  # 标签固定宽度对齐
-        self.image_input = QLineEdit(image_target_directory)
-        self.image_input.setStyleSheet(input_style)
-        image_button = QPushButton('选择目录')
-        image_button.setStyleSheet(button_style)  # 现在button_style已定义
-        image_button.clicked.connect(self.select_image_directory)
-        image_layout.addWidget(image_label)
-        image_layout.addWidget(self.image_input, 1)  # 输入框占1份空间
-        image_layout.addWidget(image_button)
-
-        # 视频目标目录选择（样式与图片目录统一）
-        video_layout = QHBoxLayout()
-        video_label = QLabel('视频目标目录:')
-        video_label.setFixedWidth(100)
-        self.video_input = QLineEdit(video_target_directory)
-        self.video_input.setStyleSheet(input_style)
-        video_button = QPushButton('选择目录')
-        video_button.setStyleSheet(button_style)  # 引用已定义的button_style
-        video_button.clicked.connect(self.select_video_directory)
-        video_layout.addWidget(video_label)
-        video_layout.addWidget(self.video_input, 1)
-        video_layout.addWidget(video_button)
-
-        # SD 卡目录选择（样式统一）
-        sd_layout = QHBoxLayout()
-        sd_label = QLabel('SD 卡目录:')
-        sd_label.setFixedWidth(100)
-        self.sd_input = QLineEdit(sd_card_directory)
-        self.sd_input.setStyleSheet(input_style)
-        sd_button = QPushButton('选择目录')
-        sd_button.setStyleSheet(button_style)  # 引用已定义的button_style
-        sd_button.clicked.connect(self.select_sd_directory)
-        sd_layout.addWidget(sd_label)
-        sd_layout.addWidget(self.sd_input, 1)
-        sd_layout.addWidget(sd_button)
-
-        # 活动名称输入（优化：标签对齐+输入框扩展）
-        event_layout = QHBoxLayout()
-        event_label = QLabel('活动名称:')
-        event_label.setFixedWidth(100)
-        self.event_input = QLineEdit()
-        self.event_input.setStyleSheet(input_style)
-        event_layout.addWidget(event_label)
-        event_layout.addWidget(self.event_input, 1)
-
-        # 分开存放复选框（最终对齐方案：与其他行标签起始位置完全一致）
-        separate_layout = QHBoxLayout()
-        # 重置左边距为0（与image_layout/video_layout等子布局保持一致）
-        separate_layout.setContentsMargins(0, 0, 0, 0)
-        # 标题标签固定宽度100px（与"图片目标目录"等标签宽度一致）
-        separate_title = QLabel('高级选项：')
-        separate_title.setFont(main_font)
-        separate_title.setFixedWidth(100)  # 关键：与其他标签宽度一致
-        # 复选框直接跟随标题，不额外添加边距
-        self.separate_raw_checkbox = QCheckBox('RAW和JPG文件分开保存')
-        self.separate_raw_checkbox.setFont(main_font)
-        # 添加顺序：标题+复选框
-        separate_layout.addWidget(separate_title)
-        separate_layout.addWidget(self.separate_raw_checkbox)
-
-        # 日期选择布局（调整下拉框高度）
-        date_layout = QHBoxLayout()  # 新增：初始化日期选择布局
-        date_label = QLabel('选择日期:')  # 新增：定义日期标签
-        date_label.setFixedWidth(100)  # 标签固定宽度对齐（与其他标签统一）
-        self.date_combo = QComboBox()
-        self.date_combo.setStyleSheet("""
+            QPushButton:pressed {
+                background-color: rgba(255, 255, 255, 15);
+            }
+            QPushButton:disabled {
+                background-color: rgba(255, 255, 255, 8);
+                color: rgba(255, 255, 255, 65);
+                border-color: rgba(255, 255, 255, 15);
+            }
+            /* 智能识别按钮 */
+            QPushButton#scanBtn {
+                background-color: rgba(56, 189, 248, 30);
+                color: #7DD3FC;
+                border: 1px solid rgba(56, 189, 248, 95);
+            }
+            QPushButton#scanBtn:hover {
+                background-color: rgba(56, 189, 248, 60);
+                color: #FFFFFF;
+                border-color: #38BDF8;
+            }
+            /* 底部流光主按钮 */
+            QPushButton#primaryBtn {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                            stop:0 #00C6FF, stop:0.5 #0072FF, stop:1 #6366F1);
+                color: #FFFFFF;
+                border: 1px solid rgba(255, 255, 255, 75);
+                border-radius: 10px;
+                font-size: 15px;
+                font-weight: 700;
+                letter-spacing: 1px;
+            }
+            QPushButton#primaryBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                            stop:0 #38BDF8, stop:0.5 #2563EB, stop:1 #818CF8);
+                border: 1px solid rgba(255, 255, 255, 140);
+            }
+            QPushButton#primaryBtn:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                            stop:0 #0284C7, stop:1 #4F46E5);
+            }
+            QPushButton#primaryBtn:disabled {
+                background: rgba(255, 255, 255, 15);
+                color: rgba(255, 255, 255, 70);
+                border: 1px solid rgba(255, 255, 255, 20);
+            }
+            /* 下拉框 */
             QComboBox {
-                border: 1px solid palette(mid);
-                border-radius: 5px;
-                padding: 5px 12px;
-                font-size: 12px;
-                background-color: palette(base);
-                color: palette(window-text);
+                padding: 0px 12px;
+                border: 1px solid rgba(255, 255, 255, 35);
+                border-radius: 8px;
+                background-color: rgba(15, 23, 42, 120);
+                color: #FFFFFF;
+                font-size: 13px;
+            }
+            QComboBox:hover {
+                border-color: rgba(255, 255, 255, 70);
+                background-color: rgba(15, 23, 42, 150);
             }
             QComboBox:focus {
-                border-color: palette(highlight);
+                border: 1.5px solid #38BDF8;
             }
             QComboBox::drop-down {
-                width: 24px;
                 border: none;
-                background: transparent;
+                width: 24px;
             }
-            QComboBox::down-arrow {
-                image: none;  /* 移除自定义SVG路径 */
+            QComboBox QAbstractItemView {
+                background-color: #1E293B;
+                color: #F8FAFC;
+                border: 1px solid rgba(255, 255, 255, 45);
+                selection-background-color: #0284C7;
+                padding: 4px;
+                outline: none;
             }
-        """)
-        # 重置为系统默认样式（自动使用标准下拉箭头）
-        self.date_combo.setStyle(QApplication.style())
-        date_button = QPushButton('获取日期')
-        date_button.setStyleSheet(button_style)
-        date_button.clicked.connect(self.get_dates)
-        date_layout.addWidget(date_label)
-        date_layout.addWidget(self.date_combo, 1)  # 下拉框占1份空间
-        date_layout.addWidget(date_button)
-
-        # 进度条（优化：增加高度+圆角，初始隐藏）
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)  # 初始隐藏
-        self.progress_bar.setStyleSheet("""
+            /* 进度条 */
             QProgressBar {
-                border: 1px solid palette(midlight);
-                border-radius: 8px;
-                background-color: palette(base);
-                height: 20px;
+                border: 1px solid rgba(255, 255, 255, 20);
+                border-radius: 5px;
+                background-color: rgba(15, 23, 42, 140);
             }
             QProgressBar::chunk {
-                background-color: palette(highlight);
-                border-radius: 7px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                            stop:0 #00F2FE, stop:0.5 #4FACFE, stop:1 #A855F7);
+                border-radius: 4px;
+            }
+            QLabel#statusLabel {
+                color: #94A3B8;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QLabel#percentLabel {
+                color: #38BDF8;
+                font-size: 13px;
+                font-weight: 700;
             }
         """)
 
-        # 结果标签（优化：增加内边距+文字颜色）
-        self.result_label = QLabel()
-        self.result_label.setFont(QFont('SF Pro', 12))
-        self.result_label.setWordWrap(True)
-        self.result_label.setStyleSheet("padding: 10px; color: palette(window-text);")
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(34, 28, 34, 28)
+        main_layout.setSpacing(12)
 
-        # 开始拷贝按钮（优化：强调按钮样式，调整尺寸）
-        start_button = QPushButton('开始拷贝')
-        start_button.setFont(QFont('SF Pro', 13, QFont.Medium))  # 原14px → 13px
-        start_button.setStyleSheet("""
-            QPushButton {
-                background-color: #007AFF;  /* macOS主题蓝 */
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 12px 24px;
-                margin: 10px 0;  /* 原10px 0 → 上下边距减小为5px */
-            }
-            QPushButton:hover {
-                background-color: #0066CC;
-            }
-        """)
-        start_button.clicked.connect(self.start_copying)
+        # ==================== 1. 顶部标题区 ====================
+        header_layout = QVBoxLayout()
+        header_layout.setSpacing(6)
+        
+        title_row = QHBoxLayout()
+        title_lbl = QLabel("SD Copy Hub")
+        title_lbl.setObjectName("titleLabel")
+        badge_lbl = QLabel("AERO GLASS v2.2")
+        badge_lbl.setObjectName("badgeLabel")
+        title_row.addWidget(title_lbl)
+        title_row.addSpacing(10)
+        title_row.addWidget(badge_lbl)
+        title_row.addStretch()
 
-        # 使用说明书（提前定义说明文本）
-        instruction_text = """使用说明：
-1. 选择目标目录：分别设置图片和视频的存储路径（默认使用系统图片/视频文件夹）
-2. 选择SD卡目录：指定需要拷贝的SD卡根目录
-3. 输入活动名称：用于生成带日期的目标文件夹（如20240520_公司活动）
-4. 选择日期：点击「获取日期」自动识别SD卡中文件的修改日期，可单选指定日期或选择「全部日期」
-5. 高级选项：勾选「RAW和JPG文件分开保存」会在「原图」目录下自动创建RAW/JPG子文件夹
-6. 开始拷贝：确认设置后点击按钮开始拷贝，进度条会显示当前拷贝进度
-"""
+        sub_lbl = QLabel("智能场次时间聚类 · 视频自动重命名 · SHA-256 高速流式校验")
+        sub_lbl.setObjectName("subtitleLabel")
+        
+        header_layout.addLayout(title_row)
+        header_layout.addWidget(sub_lbl)
+        main_layout.addLayout(header_layout)
 
-        # 使用说明书（主题自适应背景，合并重复定义）
-        instruction_label = QTextEdit()
-        instruction_label.setReadOnly(True)
-        instruction_label.setFont(QFont('SF Pro', 11))
-        instruction_label.setStyleSheet("""
-            QTextEdit {
-                background-color: palette(window);  /* 系统主窗口背景色（浅色主题为白/深色为深灰） */
-                color: palette(window-text);  /* 系统文字色（与背景自动对比） */
-                border: 1px solid palette(midlight);  /* 系统浅中间色，增强边界 */
-                border-radius: 8px;
-                padding: 15px;
-                opacity: 0.9;  /* 半透明效果 */
-            }
-        """)
-        instruction_label.setText(instruction_text)  # instruction_text 已提前定义
+        main_layout.addSpacing(6)
 
-        # 添加所有控件到主布局（顺序优化）
-        main_layout.addLayout(image_layout)
-        main_layout.addLayout(video_layout)
-        main_layout.addLayout(sd_layout)
-        main_layout.addLayout(event_layout)
-        main_layout.addLayout(separate_layout)
-        main_layout.addLayout(date_layout)
-        main_layout.addWidget(self.progress_bar)
-        main_layout.addWidget(self.result_label)
-        main_layout.addWidget(start_button, 0, Qt.AlignCenter)  # 按钮居中
+        # 读取历史配置
+        last_img_path = self.settings.value("img_path", str(Path.home() / "Pictures"))
+        last_vid_path = self.settings.value("vid_path", str(Path.home() / "Movies"))
+        last_sd_path = self.settings.value("sd_path", "/Volumes/Untitled")
 
-        # 添加使用说明入口按钮（放置在开始拷贝按钮下方）
-        instruction_button = QPushButton('使用说明')
-        instruction_button.setStyleSheet(button_style)  # 使用已定义的通用按钮样式
-        instruction_button.clicked.connect(self.show_instruction_dialog)
-        main_layout.addWidget(instruction_button, 0, Qt.AlignRight)  # 按钮右对齐
+        # ==================== 2. 第一张毛玻璃卡片：存储与路径设置 ====================
+        lbl_sec1 = QLabel("STORAGE & PATHS · 存储路径配置")
+        lbl_sec1.setObjectName("sectionHeader")
+        main_layout.addWidget(lbl_sec1)
+
+        path_card = GlassCard()
+        path_layout = QVBoxLayout(path_card)
+        path_layout.setContentsMargins(22, 18, 22, 20)
+        path_layout.setSpacing(12)
+
+        # 第一行：SD卡根目录
+        sd_row = QHBoxLayout()
+        sd_row.setSpacing(14)
+        lbl_sd = QLabel("SD 卡根目录")
+        lbl_sd.setFixedWidth(85)
+        self.sd_input = QLineEdit(last_sd_path)
+        self.sd_input.setFixedHeight(38)
+        self.sd_input.textChanged.connect(self.on_sd_path_changed)
+        self.btn_sd = QPushButton("选择存储卡")
+        self.btn_sd.setFixedSize(112, 38)
+        self.btn_sd.setCursor(Qt.PointingHandCursor)
+        self.btn_sd.clicked.connect(self.select_sd_dir)
+        sd_row.addWidget(lbl_sd)
+        sd_row.addWidget(self.sd_input, 1)
+        sd_row.addWidget(self.btn_sd)
+        path_layout.addLayout(sd_row)
+
+        path_layout.addWidget(self.create_divider())
+
+        # 第二行：照片归档库
+        img_row = QHBoxLayout()
+        img_row.setSpacing(14)
+        lbl_img = QLabel("照片归档库")
+        lbl_img.setFixedWidth(85)
+        self.img_input = QLineEdit(last_img_path)
+        self.img_input.setFixedHeight(38)
+        self.btn_img = QPushButton("浏览目录")
+        self.btn_img.setFixedSize(112, 38)
+        self.btn_img.setCursor(Qt.PointingHandCursor)
+        self.btn_img.clicked.connect(self.select_img_dir)
+        img_row.addWidget(lbl_img)
+        img_row.addWidget(self.img_input, 1)
+        img_row.addWidget(self.btn_img)
+        path_layout.addLayout(img_row)
+
+        # 第三行：视频归档库
+        vid_row = QHBoxLayout()
+        vid_row.setSpacing(14)
+        lbl_vid = QLabel("视频归档库")
+        lbl_vid.setFixedWidth(85)
+        self.vid_input = QLineEdit(last_vid_path)
+        self.vid_input.setFixedHeight(38)
+        self.btn_vid = QPushButton("浏览目录")
+        self.btn_vid.setFixedSize(112, 38)
+        self.btn_vid.setCursor(Qt.PointingHandCursor)
+        self.btn_vid.clicked.connect(self.select_vid_dir)
+        vid_row.addWidget(lbl_vid)
+        vid_row.addWidget(self.vid_input, 1)
+        vid_row.addWidget(self.btn_vid)
+        path_layout.addLayout(vid_row)
+
+        main_layout.addWidget(path_card)
+
+        main_layout.addSpacing(6)
+
+        # ==================== 3. 第二张毛玻璃卡片：场次与归档规则 ====================
+        lbl_sec2 = QLabel("SESSION & RULES · 拍摄场次与过滤")
+        lbl_sec2.setObjectName("sectionHeader")
+        main_layout.addWidget(lbl_sec2)
+
+        rule_card = GlassCard()
+        rule_layout = QVBoxLayout(rule_card)
+        rule_layout.setContentsMargins(22, 18, 22, 20)
+        rule_layout.setSpacing(12)
+
+        # 第一行：活动名称
+        event_row = QHBoxLayout()
+        event_row.setSpacing(14)
+        lbl_event = QLabel("活动后缀名")
+        lbl_event.setFixedWidth(85)
+        self.event_input = QLineEdit()
+        self.event_input.setFixedHeight(38)
+        self.event_input.setPlaceholderText("选填，自动拼接到日期文件夹后（如：公园外拍、人像写真）")
+        event_row.addWidget(lbl_event)
+        event_row.addWidget(self.event_input, 1)
+        rule_layout.addLayout(event_row)
+
+        rule_layout.addWidget(self.create_divider())
+
+        # 第二行：拍摄场次与文件类型
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(14)
+        lbl_session = QLabel("拍摄时间段")
+        lbl_session.setFixedWidth(85)
+        
+        self.date_combo = QComboBox()
+        self.date_combo.setFixedHeight(38)
+        self.date_combo.addItem("全部日期")
+        
+        self.btn_scan = QPushButton("⚡ 智能识别场次")
+        self.btn_scan.setObjectName("scanBtn")
+        self.btn_scan.setFixedSize(136, 38)
+        self.btn_scan.setCursor(Qt.PointingHandCursor)
+        self.btn_scan.clicked.connect(self.scan_sd)
+
+        lbl_filter = QLabel("媒体过滤")
+        lbl_filter.setFixedWidth(60)
+        self.type_combo = QComboBox()
+        self.type_combo.setFixedHeight(38)
+        self.type_combo.addItems(["全部文件", "仅图片", "仅视频"])
+
+        filter_row.addWidget(lbl_session)
+        filter_row.addWidget(self.date_combo, 2)
+        filter_row.addWidget(self.btn_scan)
+        filter_row.addSpacing(12)
+        filter_row.addWidget(lbl_filter)
+        filter_row.addWidget(self.type_combo, 1)
+        rule_layout.addLayout(filter_row)
+
+        main_layout.addWidget(rule_card)
+
+        # ==================== 4. 底部状态与执行区 ====================
+        main_layout.addStretch(1)
+
+        status_box = QVBoxLayout()
+        status_box.setSpacing(8)
+        
+        status_text_row = QHBoxLayout()
+        self.status_label = QLabel("准备就绪，等待导入指令")
+        self.status_label.setObjectName("statusLabel")
+        self.percent_label = QLabel("")
+        self.percent_label.setObjectName("percentLabel")
+        status_text_row.addWidget(self.status_label)
+        status_text_row.addStretch()
+        status_text_row.addWidget(self.percent_label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(10)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setValue(0)
+
+        status_box.addLayout(status_text_row)
+        status_box.addWidget(self.progress_bar)
+        main_layout.addLayout(status_box)
+
+        main_layout.addSpacing(6)
+
+        self.start_btn = QPushButton("开始安全导入")
+        self.start_btn.setObjectName("primaryBtn")
+        self.start_btn.setFixedHeight(48)
+        self.start_btn.setCursor(Qt.PointingHandCursor)
+        self.start_btn.clicked.connect(self.start_task)
+        main_layout.addWidget(self.start_btn)
 
         self.setLayout(main_layout)
 
-    def select_image_directory(self):
-        directory = QFileDialog.getExistingDirectory(self, '选择图片目标目录')
-        if directory:
-            self.image_input.setText(directory)
-
-    def select_video_directory(self):
-        directory = QFileDialog.getExistingDirectory(self, '选择视频目标目录')
-        if directory:
-            self.video_input.setText(directory)
-
-    def select_sd_directory(self):
-        directory = QFileDialog.getExistingDirectory(self, '选择 SD 卡目录')
-        if directory:
-            self.sd_input.setText(directory)
-
-    def get_dates(self):
-        sd_card = self.sd_input.text()
-        image_extensions = (
-            '.jpg', '.jpeg', '.png', '.raw', '.nef', '.cr2', '.CR3',
-            '.arw',  # 索尼 RAW 格式
-            '.dng',  # 通用 RAW 格式
-            '.raf',  # 富士 RAW 格式
-            '.orf',  # 奥林巴斯 RAW 格式
-            '.pef',  # 宾得 RAW 格式
-            '.srw',  # 三星 RAW 格式
-            '.x3f'   # 适马 RAW 格式
-        )
-        video_extensions = ('.mp4', '.avi', '.mov')
-        dates = set()
-        for root, dirs, files in os.walk(sd_card):
-            for file in files:
-                lower_file = file.lower()
-                is_image = any(lower_file.endswith(ext.lower()) for ext in image_extensions)
-                is_video = any(lower_file.endswith(ext.lower()) for ext in video_extensions)
-                if is_image or is_video:
-                    file_path = os.path.join(root, file)
-                    try:
-                        date_taken = datetime.datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%Y%m%d')
-                        dates.add(date_taken)
-                    except Exception as e:
-                        logging.error(f"Failed to get modification time for {file}: {e}")
+    def on_sd_path_changed(self):
+        self.cached_files = []
         self.date_combo.clear()
         self.date_combo.addItem("全部日期")
-        for date in sorted(dates):
-            self.date_combo.addItem(date)
 
-    def start_copying(self):
-        # 显示进度条
-        self.progress_bar.setVisible(True)
-        # 清空上次结果
-        self.result_label.setText("")
-        
-        # 获取用户输入参数
-        image_target = self.image_input.text()
-        video_target = self.video_input.text()
-        sd_card = self.sd_input.text()
-        event_name = self.event_input.text()
-        selected_dates = [self.date_combo.currentText()] if self.date_combo.currentText() != "全部日期" else []
-        separate_raw = self.separate_raw_checkbox.isChecked()
-    
-        # 校验输入（补充基础校验逻辑）
-        if not image_target or not video_target or not sd_card:
-            QMessageBox.warning(self, "错误", "请至少选择图片目标目录、视频目标目录和SD卡目录")
+    def select_img_dir(self):
+        directory = QFileDialog.getExistingDirectory(self, "选择图片保存目录", self.img_input.text())
+        if directory:
+            self.img_input.setText(directory)
+            self.settings.setValue("img_path", directory)
+
+    def select_vid_dir(self):
+        directory = QFileDialog.getExistingDirectory(self, "选择视频保存目录", self.vid_input.text())
+        if directory:
+            self.vid_input.setText(directory)
+            self.settings.setValue("vid_path", directory)
+
+    def select_sd_dir(self):
+        directory = QFileDialog.getExistingDirectory(self, "选择 SD 卡根目录", self.sd_input.text())
+        if directory:
+            self.sd_input.setText(directory)
+            self.settings.setValue("sd_path", directory)
+            self.scan_sd()
+
+    def set_ui_locked(self, locked: bool):
+        self.start_btn.setEnabled(not locked)
+        self.btn_scan.setEnabled(not locked)
+        self.btn_sd.setEnabled(not locked)
+        self.btn_img.setEnabled(not locked)
+        self.btn_vid.setEnabled(not locked)
+        self.date_combo.setEnabled(not locked)
+        self.type_combo.setEnabled(not locked)
+
+    def scan_sd(self):
+        sd_path = self.sd_input.text().strip()
+        if not os.path.exists(sd_path):
+            self.status_label.setText("⚠️ SD 卡路径不存在，请检查存储卡是否已挂载")
             return
-    
-        # 启动拷贝线程
-        self.copy_thread = CopyThread(image_target, video_target, sd_card, event_name, selected_dates, separate_raw)
-        self.copy_thread.progress_signal.connect(self.update_progress)
-        self.copy_thread.result_signal.connect(self.show_result)
+
+        self.set_ui_locked(True)
+        self.status_label.setText("🔍 正在扫描 SD 卡并聚类拍摄场次...")
+        self.progress_bar.setRange(0, 0)
+        
+        self.scan_thread = ScanThread(sd_path)
+        self.scan_thread.scan_done_signal.connect(self.on_scan_done)
+        self.scan_thread.start()
+
+    def on_scan_done(self, groups, cached_files):
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.set_ui_locked(False)
+
+        self.cached_files = cached_files
+        self.date_combo.clear()
+        self.date_combo.addItem("全部日期")
+        self.date_combo.addItems(groups)
+        
+        if groups:
+            self.status_label.setText(f"✅ 识别完成：共发现 {len(groups)} 个拍摄场次（总计 {len(cached_files)} 个媒体文件）")
+        else:
+            self.status_label.setText("提示：未在 SD 卡中发现支持的图片或视频文件")
+
+    def on_progress_update(self, val):
+        self.progress_bar.setValue(val)
+        self.percent_label.setText(f"{val}%")
+
+    def on_copy_finished(self, msg):
+        self.set_ui_locked(False)
+        self.status_label.setText(msg)
+
+    def start_task(self):
+        sd_path = self.sd_input.text().strip()
+        if not os.path.exists(sd_path):
+            self.status_label.setText("⚠️ 找不到 SD 卡路径，请确认存储卡已插入")
+            return
+
+        self.settings.setValue("img_path", self.img_input.text())
+        self.settings.setValue("vid_path", self.vid_input.text())
+        self.settings.setValue("sd_path", sd_path)
+
+        self.set_ui_locked(True)
+        self.progress_bar.setValue(0)
+        self.percent_label.setText("0%")
+        self.status_label.setText("🚀 正在初始化高速导入引擎...")
+
+        self.copy_thread = CopyThread(
+            self.img_input.text().strip(),
+            self.vid_input.text().strip(),
+            sd_path,
+            self.event_input.text(),
+            self.date_combo.currentText(),
+            self.type_combo.currentText(),
+            self.cached_files
+        )
+        self.copy_thread.progress_signal.connect(self.on_progress_update)
+        self.copy_thread.status_signal.connect(self.status_label.setText)
+        self.copy_thread.finished_signal.connect(self.on_copy_finished)
         self.copy_thread.start()
 
-    def update_progress(self, progress):
-        self.progress_bar.setValue(progress)
-
-    def show_result(self, result):
-        if "SD 卡目录中没有可用的图片或视频文件" in result:
-            QMessageBox.warning(self, "警告", result)
-        else:
-            self.result_label.setText(result)
-
-    def show_instruction_dialog(self):
-        """显示使用说明对话框"""
-        dialog = InstructionDialog(self)
-        dialog.exec_()  # 模态显示对话框（阻塞主窗口）
 
 if __name__ == '__main__':
-    import sys
-    app = QApplication(sys.argv)  # 必须先创建 QApplication 实例
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec_())  # 启动事件循环
-
-
-class DirectorySelector(QWidget):
-    """目录选择组件（独立封装）"""
-    def __init__(self, label_text, default_path):
-        super().__init__()
-        self.label = QLabel(label_text)
-        self.label.setFixedWidth(100)
-        self.input = QLineEdit(default_path)
-        self.input.setStyleSheet(input_style)  # 复用全局输入框样式
-        self.button = QPushButton('选择目录')
-        self.button.setStyleSheet(button_style)  # 复用全局按钮样式
-        
-        layout = QHBoxLayout()
-        layout.addWidget(self.label)
-        layout.addWidget(self.input, 1)
-        layout.addWidget(self.button)
-        self.setLayout(layout)
-
-    def get_path(self):
-        return self.input.text()
-
-    def initUI(self):
-        # 使用封装后的目录选择组件
-        self.image_selector = DirectorySelector('图片目标目录:', image_target_directory)
-        self.video_selector = DirectorySelector('视频目标目录:', video_target_directory)
-        self.sd_selector = DirectorySelector('SD 卡目录:', sd_card_directory)
-
-        # 连接按钮点击事件
-        self.image_selector.button.clicked.connect(self.select_image_directory)
-        self.video_selector.button.clicked.connect(self.select_video_directory)
-        self.sd_selector.button.clicked.connect(self.select_sd_directory)
-
-        # 将组件添加到主布局
-        main_layout.addWidget(self.image_selector)
-        main_layout.addWidget(self.video_selector)
-        main_layout.addWidget(self.sd_selector)
-
-        # 主题选择布局
-        theme_layout = QHBoxLayout()
-        theme_label = QLabel('选择主题:')
-        theme_label.setFixedWidth(100)
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItems(['系统默认', '深色主题', '浅色主题'])
-        self.theme_combo.setStyleSheet(input_style)  # 复用输入框样式
-        self.theme_combo.currentIndexChanged.connect(self.change_theme)
-        theme_layout.addWidget(theme_label)
-        theme_layout.addWidget(self.theme_combo, 1)
-        # 将主题布局调整到目录选择之后，更靠前的位置
-        main_layout.addLayout(image_layout)
-        main_layout.addLayout(video_layout)
-        main_layout.addLayout(sd_layout)
-        main_layout.addLayout(theme_layout)  # 调整到此处
-        main_layout.addLayout(event_layout)
-        main_layout.addLayout(separate_layout)
-        main_layout.addLayout(date_layout)
-
-    def change_theme(self, index):
-        """根据选择切换主题"""
-        palette = QPalette()
-        if index == 1:  # 深色主题
-            dark_color = QColor(53, 53, 53)
-            palette.setColor(QPalette.Window, dark_color)
-            palette.setColor(QPalette.WindowText, Qt.white)
-            palette.setColor(QPalette.Base, QColor(25, 25, 25))
-            palette.setColor(QPalette.AlternateBase, dark_color)
-            palette.setColor(QPalette.Text, Qt.white)
-            palette.setColor(QPalette.Button, dark_color)
-            palette.setColor(QPalette.ButtonText, Qt.white)
-        elif index == 2:  # 浅色主题
-            light_color = QColor(240, 240, 240)
-            palette.setColor(QPalette.Window, light_color)
-            palette.setColor(QPalette.WindowText, Qt.black)
-            palette.setColor(QPalette.Base, QColor(255, 255, 255))
-            palette.setColor(QPalette.AlternateBase, light_color)
-            palette.setColor(QPalette.Text, Qt.black)
-            palette.setColor(QPalette.Button, light_color)
-            palette.setColor(QPalette.ButtonText, Qt.black)
-        else:  # 系统默认
-            palette = QApplication.palette()
-        self.setPalette(palette)  # 应用全局调色板
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     
+    app = QApplication(sys.argv)
+    ex = MainWindow()
+    ex.show()
+    sys.exit(app.exec_())
