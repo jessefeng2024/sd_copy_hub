@@ -8,11 +8,6 @@ SD Copy Hub 是一个专为摄影师设计的实用工具，用于从 SD 卡快�
 <img width="856" height="631" alt="27901" src="https://github.com/user-attachments/assets/78c9443d-3329-458f-9b58-e282dbb8125b" />
 
 
-## 优化了UI，之前真的太丑了（5.30）
-![image](https://github.com/user-attachments/assets/e11ffb83-572a-478f-9382-56004a379e49)
-
-
-
 ## 为什么要写这个程序？
 
 针对摄影师/摄影爱好者，增加日常拷卡效率，以及照片归档的准确性。
