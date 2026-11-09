@@ -3,6 +3,11 @@
 ## 项目概述
 SD Copy Hub 是一个专为摄影师设计的实用工具，用于从 SD 卡快速、准确地拷贝图片和视频文件到指定目录。它解决了摄影师在拷卡过程中遇到的文件命名、分类和校验等问题，提高了工作效率。
 
+##更新了V1.9版本（2026.11.9）
+目前在稳定使用的版本
+<img width="856" height="631" alt="27901" src="https://github.com/user-attachments/assets/78c9443d-3329-458f-9b58-e282dbb8125b" />
+
+
 ## 优化了UI，之前真的太丑了（5.30）
 ![image](https://github.com/user-attachments/assets/e11ffb83-572a-478f-9382-56004a379e49)
 
